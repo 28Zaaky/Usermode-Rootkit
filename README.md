@@ -32,8 +32,4 @@ Windows usermode rootkit with privilege escalation, stealth capabilities, and re
 - Real-time keylog viewer
 - SQLite backend for persistence
 
-**FOR EDUCATIONAL AND AUTHORIZED TESTING ONLY**
-
-Unauthorized access to computer systems is illegal. This software is provided for security research and authorized penetration testing only. The author assumes no liability for misuse. Use responsibly.
-
 **Contact:** 28zaakypro@proton.me
