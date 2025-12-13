@@ -1,4 +1,4 @@
-# XvX Usermode Rootkit with C2
+# Usermode Rootkit with C2
 
 Windows usermode rootkit with privilege escalation, stealth capabilities, and remote C2 management.
 
