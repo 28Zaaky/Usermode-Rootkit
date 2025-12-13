@@ -21,7 +21,7 @@ A sophisticated usermode rootkit featuring EDR bypass techniques, privilege esca
 
 ```powershell
 # Build the rootkit
-.\build_debug_complete.ps1
+.\build.ps1
 
 # Start C2 server
 python c2_server.py
