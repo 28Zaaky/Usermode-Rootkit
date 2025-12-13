@@ -2287,7 +2287,7 @@ HTML_TEMPLATE = """
                             const timestamp = document.createElement('div');
                             timestamp.style.cssText = 'color: var(--text-muted); font-size: 11px; margin-bottom: 10px; border-bottom: 1px solid var(--border); padding-bottom: 5px;';
                             const date = new Date(log.received_at);
-                            timestamp.textContent = '📅 ' + date.toLocaleString();
+                            timestamp.textContent = date.toLocaleString();
                             logBox.appendChild(timestamp);
                             
                             // Parse and format output
@@ -2303,7 +2303,7 @@ HTML_TEMPLATE = """
                                 // Highlight window titles
                                 if (line.includes('Window:')) {
                                     lineDiv.style.cssText = 'color: var(--accent); font-weight: 600; margin-top: 10px; margin-bottom: 5px;';
-                                    lineDiv.textContent = '🪟 ' + line;
+                                    lineDiv.textContent = line;
                                 } 
                                 // Highlight special keys
                                 else if (line.match(/\\[(ENTER|TAB|BACKSPACE|SPACE|SHIFT|CTRL|ALT|ESC|DELETE)\\]/)) {
