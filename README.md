@@ -1,40 +1,69 @@
-# Advanced Windows Rootkit with C2 Framework
+# XvX Usermode Rootkit with C2
 
-A sophisticated usermode rootkit featuring EDR bypass techniques, privilege escalation, and a professional web-based Command & Control dashboard.
+Windows usermode rootkit with privilege escalation, stealth capabilities, and remote C2 management.
 
 ## Features
 
-- **EDR Bypass**: Indirect syscalls, NTDLL unhooking, ETW/AMSI bypass
-- **Privilege Escalation**: Token stealing for SYSTEM access
-- **Keylogger**: Real-time keystroke capture and exfiltration
-- **Interactive SYSTEM Shell**: Reverse shell with SYSTEM privileges
-- **Professional C2 Dashboard**: Modern web interface for agent management
+**Core Capabilities:**
+- Token stealing for NT AUTHORITY\SYSTEM privileges
+- UAC bypass mechanisms
+- Process/file/registry hiding via inline hooking
+- Interactive SYSTEM reverse shell (TCP port 4444)
+- DLL injection into target processes
+- Real-time keylogger with C2 exfiltration
 
-## Quick Start
+**Anti-Analysis:**
+- VM detection (VMware, VirtualBox, QEMU)
+- Debugger detection (PEB, NtQueryInformationProcess)
+- Sandbox evasion techniques
 
-### Prerequisites
-- Visual Studio 2022 (C++17)
-- Python 3.x
-- Flask: `pip install flask`
+**C2 Infrastructure:**
+- Flask HTTPS server with web dashboard (port 8443)
+- XOR encrypted C2 communications
+- Agent registration and task queuing
+- Real-time keylog viewer
+- SQLite backend for persistence
 
-### Build & Run
+## Requirements
+
+- **Build:** Visual Studio 2022 (C++17)
+- **C2 Server:** Python 3.x + Flask (`pip install flask`)
+- **Target:** Windows 10/11 (tested on 10.0.26200)
+
+## Usage
 
 ```powershell
-# Build the rootkit
+# 1. Build rootkit
 .\build.ps1
 
-# Start C2 server
+# 2. Start C2 server
 python c2_server.py
+
+# 3. Deploy rootkit.exe on target
+# 4. Access dashboard: https://127.0.0.1:8443
 ```
 
-Access dashboard at: `https://127.0.0.1:8443`
+## Architecture
 
-## ⚠️ DISCLAIMER
+```
+rootkit.exe (main)
+├── Token stealing → NT AUTHORITY\SYSTEM
+├── C2Client → HTTPS beaconing (XOR encrypted)
+├── Keylogger → Keystroke capture
+├── AntiAnalysis → VM/debugger checks
+└── DLL Injection
+    ├── processHooks.dll → Process hiding
+    ├── fileHooks.dll → File hiding
+    └── registryHooks.dll → Registry hiding
+```
 
-**FOR EDUCATIONAL PURPOSES ONLY**
+## ⚠️ Legal Disclaimer
 
-This project is intended for authorized security research and educational purposes only. Unauthorized access to computer systems is illegal. The author assumes no liability for misuse of this software. Use only in controlled, authorized testing environments.
+**FOR EDUCATIONAL AND AUTHORIZED TESTING ONLY**
+
+Unauthorized access to computer systems is illegal. This software is provided for security research and authorized penetration testing only. The author assumes no liability for misuse. Use responsibly.
 
 ---
 
-Created by [28Zaaky](https://github.com/28Zaaky)
+**Author:** [28Zaaky](https://github.com/28Zaaky)  
+**Contact:** 28zaakypro@proton.me
