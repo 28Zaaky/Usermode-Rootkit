@@ -1,8 +1,8 @@
-# Usermode Rootkit with C2
+# Educational Usermode Rootkit with C2
 
 ![C2 screenshot](https://github.com/28Zaaky/Usermode-Rootkit/blob/82292f2a6d0c4f46ad9b3db686fc275e6ce17589/Capture%20d'%C3%A9cran%202025-12-12%20173844.png)
 
-Windows usermode rootkit with privilege escalation, stealth capabilities, and remote C2 management.
+Simple Windows usermode rootkit with privilege escalation, stealth capabilities, and remote C2 management.
 
 > **Educational Use Only**  
 > This repository contains a **proof-of-concept** of usermode rootkits techniques for research and defensive learning purposes:
