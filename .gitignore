@@ -1,0 +1,272 @@
+# ============================================================================
+# NT AUTHORITY\SYSTEM Rootkit - .gitignore
+# ============================================================================
+
+# ============================================================================
+# Binaires Compilés (À NE JAMAIS COMMIT)
+# ============================================================================
+
+# Executables Windows
+*.exe
+*.dll
+*.obj
+*.o
+*.lib
+*.exp
+
+# Binaires Linux
+*.out
+*.elf
+*.so
+
+# ============================================================================
+# Certificats et Clés Privées (CRITIQUE - NE JAMAIS COMMIT)
+# ============================================================================
+
+# Certificats TLS/SSL
+*.pem
+*.key
+*.crt
+*.cer
+*.p12
+*.pfx
+cert.*
+key.*
+
+# Clés de chiffrement
+secrets.txt
+credentials.txt
+*.secret
+*.creds
+
+# ============================================================================
+# Bases de Données et Configurations Sensibles
+# ============================================================================
+
+# SQLite
+*.db
+*.sqlite
+*.sqlite3
+
+# Configurations C2
+c2_config.txt
+config.private.*
+.env
+
+# ============================================================================
+# Logs et Outputs (Peuvent contenir données sensibles)
+# ============================================================================
+
+# Logs généraux
+*.log
+*.txt
+!README.txt
+!requirements.txt
+
+# Outputs de compilation
+build/
+dist/
+deploy_package/*.exe
+deploy_package/*.dll
+
+# ============================================================================
+# Python
+# ============================================================================
+
+# Virtual environment
+.venv/
+venv/
+env/
+ENV/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# ============================================================================
+# C/C++ Compilation Artifacts
+# ============================================================================
+
+# Objets
+*.o
+*.obj
+*.ko
+*.elf
+
+# Bibliothèques précompilées
+*.lib
+*.a
+*.la
+*.lo
+
+# Bibliothèques partagées
+*.dll
+*.so
+*.so.*
+*.dylib
+
+# Executables
+*.exe
+*.out
+*.app
+
+# Debug
+*.dSYM/
+*.su
+*.idb
+*.pdb
+
+# ============================================================================
+# IDE et Éditeurs
+# ============================================================================
+
+# Visual Studio Code
+.vscode/
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+
+# Visual Studio
+.vs/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+*.vcxproj.filters
+*.vcxproj.user
+
+# JetBrains IDEs
+.idea/
+*.iml
+*.ipr
+*.iws
+
+# Sublime Text
+*.sublime-project
+*.sublime-workspace
+
+# Vim
+*.swp
+*.swo
+*~
+
+# ============================================================================
+# Fichiers de Debug et Tests
+# ============================================================================
+
+# Scripts de debug temporaires
+check_*.py
+monitor_*.py
+cleanup_*.py
+full_check.py
+debug_*.py
+test_*.py
+
+# Dumps mémoire
+*.dmp
+*.mdmp
+memdump_*
+
+# Coverage
+.coverage
+htmlcov/
+*.cover
+.hypothesis/
+.pytest_cache/
+
+# ============================================================================
+# Système d'Exploitation
+# ============================================================================
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+*.cab
+*.msi
+*.msix
+*.msm
+*.msp
+*.lnk
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Linux
+*~
+.fuse_hidden*
+.directory
+.Trash-*
+
+# ============================================================================
+# Archives et Packages
+# ============================================================================
+
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+*.rar
+*.7z
+
+# ============================================================================
+# Documentation Générée
+# ============================================================================
+
+# Doxygen
+html/
+latex/
+doxygen_sqlite3.db
+
+# ============================================================================
+# Fichiers Temporaires
+# ============================================================================
+
+*.tmp
+*.temp
+*.bak
+*.swp
+*.swo
+*~
+
+# ============================================================================
+# Projets d'Apprentissage (Garder Sources, Pas Binaires)
+# ============================================================================
+
+# Sections de cours (à évaluer au cas par cas)
+Section*/*/
+section*/*/
+
+# Garder les articles de blog
+!blog_articles/
+
+# ============================================================================
+# ATTENTION: Avant de commit, vérifier avec:
+# git status --ignored
+# ============================================================================
