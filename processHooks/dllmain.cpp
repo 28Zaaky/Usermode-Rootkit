@@ -122,7 +122,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD dwReason, LPVOID lpReserved) {
         
     case DLL_PROCESS_ATTACH:
         {
-            // Anti-VM and anti-debugging check (disabled in DLL context)
+            // Anti-VM and anti-debugging check
             // if (!isSafeEnvironment()) {
             //     return FALSE;
             // }
