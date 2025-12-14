@@ -35,17 +35,6 @@ def xor_encrypt(data: str, key: str) -> bytes:
     return bytes(result)
 
 def xor_decrypt(encrypted_wstring_bytes: bytes, key: str) -> str:
-    """
-    Déchiffre des bytes XOR (wstring format) et retourne string.
-    
-    Le C++ fait: wstring XOR wstring (caractère par caractère, pas byte par byte)
-    
-    Processus:
-    1. encrypted_wstring_bytes contient une wstring chiffrée (UTF-16-LE)
-    2. Décoder en wstring pour obtenir les wchar_t chiffrés
-    3. XOR chaque wchar_t avec la clé (aussi en wchar_t)
-    4. Retourner la string déchiffrée
-    """
     # Décoder les bytes UTF-16-LE en liste de wchar_t
     encrypted_wchars = []
     for i in range(0, len(encrypted_wstring_bytes), 2):
@@ -70,7 +59,6 @@ def base64_decode_wstring(data: bytes) -> bytes:
 
 # Base de données SQLite
 def init_db():
-    """Créer les tables SQLite si elles n'existent pas."""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     
