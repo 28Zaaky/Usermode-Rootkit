@@ -1,11 +1,3 @@
-/*
- * XvX Rootkit - Registry Hooks DLL
- * Copyright (c) 2025 - 28zaakypro@proton.me
- * 
- * NtEnumerateKey/NtEnumerateValueKey hooking to hide registry entries.
- * Filters KEY_BASIC_INFORMATION and KEY_VALUE_FULL_INFORMATION structures.
- */
-
 #include <windows.h>
 #include <winternl.h>
 #include <string>
