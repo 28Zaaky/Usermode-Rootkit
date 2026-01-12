@@ -1,11 +1,3 @@
-/*
- * XvX Rootkit - Process Hooks DLL
- * Copyright (c) 2025 - 28zaakypro@proton.me
- * 
- * NtQuerySystemInformation hooking to hide processes from Task Manager.
- * Filters SYSTEM_PROCESS_INFORMATION structures to remove target processes.
- */
-
 #include <windows.h>
 #include <winternl.h>
 #include <string>
