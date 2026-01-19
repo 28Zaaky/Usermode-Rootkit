@@ -7,8 +7,7 @@ Windows usermode rootkit implementing stealth techniques, privilege escalation, 
 > **Educational Use Only**  
 > This repository contains a **proof-of-concept** of usermode rootkit techniques for research and defensive learning purposes.
 >
-> Running or modifying this code on systems you do not own or without explicit written authorization is **illegal and unethical**.  
-> This project is for **research, learning, and defense development** only.
+> Running or modifying this code on systems you do not own or without explicit written authorization is **illegal and unethical**. This project is for **research, learning, and defense development** only.
 
 ## Features
 
