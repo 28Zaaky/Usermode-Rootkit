@@ -22,6 +22,13 @@ Windows usermode rootkit implementing stealth techniques, privilege escalation, 
 - IPC synchronization with memory-mapped files
 - String obfuscation (custom crypto)
 
+**Keylogger:**
+- Low-level keyboard hook via SetWindowsHookEx (WH_KEYBOARD_LL)
+- Captures all keystrokes + active window titles in real-time
+- Buffered transmission with wstring management
+- Automatic C2 exfiltration via HTTPS beacon
+- OnKeylogData callback with commandID tracking
+
 **Anti-Analysis:**
 - VM detection (5 methods: CPUID, registry, hardware checks)
 - Debugger detection (PEB, timing, NtQueryInformationProcess)
@@ -184,12 +191,5 @@ On-demand injection:
 - XOR encryption (key: 0x7D)
 - Agent registration with unique ID (PID + timestamp)
 - Task queue with result storage
-
-**Keylogger:**
-- Low-level keyboard hook via SetWindowsHookEx (WH_KEYBOARD_LL)
-- Captures all keystrokes + active window titles in real-time
-- Buffered transmission with wstring management
-- Automatic C2 exfiltration via HTTPS beacon
-- OnKeylogData callback with commandID tracking
 
 **Contact:** 28zaakypro@proton.me
