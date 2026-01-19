@@ -33,7 +33,7 @@ Windows usermode rootkit implementing stealth techniques, privilege escalation, 
 - HTTPS server with web dashboard (Flask, port 8443)
 - Interactive shell with cmd.exe redirection
 - TCP reverse shell with SYSTEM token
-- Real-time keylogger with exfiltration
+- Real-time keylogger with exfiltration (low-level hooks, all keystrokes + window titles)
 - File exfiltration support
 - 15+ remote commands
 
