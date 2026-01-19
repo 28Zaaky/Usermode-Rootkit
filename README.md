@@ -53,7 +53,7 @@ Windows usermode rootkit implementing stealth techniques, privilege escalation, 
 
 **Requirements:**
 - MinGW-w64 (GCC 15.2+)
-- Windows 10/11 x64
+- Windows 11 x64
 - PowerShell 5.1+
 
 **Compilation:**
@@ -92,7 +92,7 @@ python http_server.py
 
 **3. Deploy on Target:**
 ```powershell
-# Option A: Direct execution (requires Admin)
+# Option A: Direct execution
 .\r00tkit.exe
 
 # Option B: Dropper (downloads + installs to AppData)
