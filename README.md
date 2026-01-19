@@ -185,4 +185,11 @@ On-demand injection:
 - Agent registration with unique ID (PID + timestamp)
 - Task queue with result storage
 
+**Keylogger:**
+- Low-level keyboard hook via SetWindowsHookEx (WH_KEYBOARD_LL)
+- Captures all keystrokes + active window titles in real-time
+- Buffered transmission with wstring management
+- Automatic C2 exfiltration via HTTPS beacon
+- OnKeylogData callback with commandID tracking
+
 **Contact:** 28zaakypro@proton.me
