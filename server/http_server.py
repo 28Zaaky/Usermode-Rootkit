@@ -15,10 +15,8 @@ import os
 import socket
 from pathlib import Path
 
-# Port used by default
 DEFAULT_PORT = 8000
 
-# Handler that logs requests with more details
 class DetailedHTTPRequestHandler(http.server.SimpleHTTPRequestHandler):
     def log_message(self, format, *args):
         """Override to have more detailed logs"""

