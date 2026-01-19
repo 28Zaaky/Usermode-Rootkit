@@ -21,6 +21,8 @@ Supported Commands:
   - unhide_all: Unhide all hidden items
   - sleep|<ms>: Change beacon interval
   - die: Terminate rootkit
+
+Claud Sonnet 4.5 helped for the frontend
 """
 
 from flask import Flask, request, jsonify, render_template_string, send_file
