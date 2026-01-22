@@ -152,7 +152,7 @@ bool injectDLL(const wchar_t *dllPath, DWORD targetPID)
     }
 
     // 6. Wait for LoadLibraryW to complete
-    fnWaitForSingleObject(hThread, 5000); // 5 second timeout
+    fnWaitForSingleObject(hThread, 5000);
 
 #ifdef _DEBUG
     wcout << L"[SUCCESS] DLL injected: " << dllPath << L" -> PID " << targetPID << endl;
